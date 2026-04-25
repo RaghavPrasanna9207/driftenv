@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -10,9 +11,16 @@ from typing import Any
 import networkx as nx
 
 from environment.action_parser import parse_action
+from environment.action_parser import (
+    ACTION_DEFINITIONS,
+    EA_ACTION_TYPES,
+    REPAIR_ACTION_TYPES,
+    build_action_schema_text,
+)
 from environment.graph_engine import GraphEngine
 from environment.observation import build_observation
 from environment.reward import (
+    compute_action_failure_penalty,
     compute_r1,
     compute_r2,
     compute_r3,
@@ -34,6 +42,9 @@ GRAPH_BOUND_PARAM_FIELDS = {
 }
 
 GRAPH_BOUND_LIST_PARAM_FIELDS = {"node_ids"}
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenEnv(ABC):
@@ -149,7 +160,61 @@ class DriftEnv(OpenEnv):
             }
 
         parsed_action = parse_action(action_text)
+        validation_status = parsed_action.get("validation_status", "invalid_json")
+        validation_result = {
+            "raw_action": action_text,
+            "parsed_action": parsed_action,
+            "validation_status": validation_status,
+            "error_message": parsed_action.get("error_message"),
+        }
+        logger.debug(
+            "raw_action=%s parsed_action=%s validation_result=%s",
+            action_text,
+            parsed_action,
+            validation_result,
+        )
         self._apply_scheduled_mutations(self.turn)
+
+        if not parsed_action.get("valid", False):
+            penalty = compute_action_failure_penalty(validation_status)
+            self.last_action_result = {
+                "success": False,
+                "validation_status": validation_status,
+                "inconsistency_signals": [
+                    parsed_action.get("error_message", "Invalid action format.")
+                ],
+            }
+            self.tasks_resolved = False
+            self.turn += 1
+            self.done = self.turn > self.MAX_TURNS
+
+            combined_signals = list(self.active_inconsistency_signals)
+            combined_signals.extend(self.last_action_result["inconsistency_signals"])
+            observation = self._build_observation(combined_signals)
+
+            return {
+                "observation": observation,
+                "reward": penalty,
+                "done": self.done,
+                "info": {
+                    "reward_breakdown": {
+                        "validation_penalty": penalty,
+                        "reason": validation_status,
+                        "error_message": parsed_action.get("error_message"),
+                        "r1": 0.0,
+                        "r2": 0.0,
+                        "r3": 0.0,
+                        "r4": 0.0,
+                        "r5": 0.0,
+                    },
+                    "parsed_action": parsed_action,
+                    "validation_result": validation_result,
+                    "action_result": self.last_action_result,
+                    "turn": self.turn - 1,
+                    "tasks_resolved": self.tasks_resolved,
+                },
+            }
+
         action_result = self._execute_action(parsed_action)
         self.last_action_result = action_result
 
@@ -189,6 +254,7 @@ class DriftEnv(OpenEnv):
                     "r5": r5,
                 },
                 "parsed_action": parsed_action,
+                "validation_result": validation_result,
                 "action_result": action_result,
                 "reward_inputs": {
                     "mutated_nodes": list(self.mutated_nodes),
@@ -254,16 +320,16 @@ class DriftEnv(OpenEnv):
         action_type = action["action_type"]
         params = action.get("params", {})
 
-        if action_type in {
-            "draft_reply",
-            "reschedule_meeting",
-            "delegate_task",
-            "escalate",
-            "decline_meeting",
-        }:
+        if action_type in EA_ACTION_TYPES:
             return self._handle_ea_action(action_type, params)
 
-        return self._handle_repair_action(action_type, params)
+        if action_type in REPAIR_ACTION_TYPES:
+            return self._handle_repair_action(action_type, params)
+
+        return {
+            "success": False,
+            "inconsistency_signals": [f"Unhandled action type: {action_type}."],
+        }
 
     def _handle_ea_action(self, action_type: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle one executive-assistant action."""
@@ -430,6 +496,7 @@ class DriftEnv(OpenEnv):
             mutation_history=[self._format_mutation_history_entry(entry) for entry in self.mutation_history],
             active_policy_excerpt=self._build_policy_excerpt(),
             turn_number=min(self.turn, self.MAX_TURNS),
+            action_schema_text=build_action_schema_text(),
         )
 
     def _build_task_description(self) -> str:
@@ -481,20 +548,16 @@ class DriftEnv(OpenEnv):
         """Construct a lightweight ground-truth schema for action-validity scoring."""
 
         action_type = parsed_action.get("action_type")
-        required_fields_map = {
-            "draft_reply": ["recipient_id", "message"],
-            "reschedule_meeting": ["meeting_id", "new_time"],
-            "delegate_task": ["task_id", "assignee_id"],
-            "escalate": ["issue_id", "target_id"],
-            "decline_meeting": ["meeting_id", "reason"],
-            "flag_inconsistency": ["node_id"],
-            "propose_node_removal": ["node_id"],
-            "propose_edge_update": ["source", "old_target", "new_target"],
-            "propose_attribute_update": ["node_id", "attribute_name", "new_value"],
-            "request_clarification": ["question"],
-        }
+        action_definition = ACTION_DEFINITIONS.get(action_type, {})
+        required_fields: list[str]
         if action_type == "flag_inconsistency" and "node_ids" in parsed_action.get("params", {}):
-            required_fields_map["flag_inconsistency"] = ["node_ids"]
+            required_fields = ["node_ids"]
+        elif "required_params" in action_definition:
+            required_fields = list(action_definition["required_params"])
+        elif "required_any_of" in action_definition:
+            required_fields = ["node_id"]
+        else:
+            required_fields = []
 
         focus_nodes = self._resolve_observation_centers()
         if not focus_nodes:
@@ -505,7 +568,7 @@ class DriftEnv(OpenEnv):
 
         return {
             "stakeholders": focus_nodes,
-            "required_fields": required_fields_map.get(action_type, []),
+            "required_fields": required_fields,
             "valid_nodes": valid_nodes,
             "valid_edges": valid_edges,
         }

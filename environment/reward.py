@@ -8,6 +8,24 @@ from typing import Any
 import networkx as nx
 
 
+ACTION_FAILURE_PENALTIES = {
+    "invalid_json": -1.0,
+    "unsupported_action": -0.75,
+    "wrong_parameters": -0.5,
+}
+
+
+def compute_action_failure_penalty(validation_status: str) -> float:
+    """Return the penalty for a structurally invalid action.
+
+    The environment uses a stronger penalty for malformed JSON than for a
+    syntactically valid but unsupported or under-specified action so the
+    rollout can still learn from distinct failure modes.
+    """
+
+    return ACTION_FAILURE_PENALTIES.get(validation_status, -1.0)
+
+
 def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
     """Score action correctness against a ground-truth action specification.
 

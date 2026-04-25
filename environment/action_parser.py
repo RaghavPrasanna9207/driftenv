@@ -6,24 +6,73 @@ import json
 from json import JSONDecodeError
 from typing import Any
 
+ACTION_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "draft_reply": {
+        "category": "ea",
+        "description": "Draft a reply to a recipient.",
+        "required_params": ("recipient_id", "message"),
+    },
+    "reschedule_meeting": {
+        "category": "ea",
+        "description": "Propose a new meeting time.",
+        "required_params": ("meeting_id", "new_time"),
+    },
+    "delegate_task": {
+        "category": "ea",
+        "description": "Delegate a task to another person.",
+        "required_params": ("task_id", "assignee_id"),
+    },
+    "escalate": {
+        "category": "ea",
+        "description": "Escalate an issue to a target stakeholder.",
+        "required_params": ("issue_id", "target_id"),
+    },
+    "decline_meeting": {
+        "category": "ea",
+        "description": "Decline a meeting with a reason.",
+        "required_params": ("meeting_id", "reason"),
+    },
+    "flag_inconsistency": {
+        "category": "repair",
+        "description": "Flag one or more suspicious graph nodes.",
+        "required_any_of": (("node_id",), ("node_ids",)),
+    },
+    "propose_node_removal": {
+        "category": "repair",
+        "description": "Propose removing a node from the belief graph.",
+        "required_params": ("node_id",),
+    },
+    "propose_edge_update": {
+        "category": "repair",
+        "description": "Propose rewiring an edge to a new target.",
+        "required_params": ("source", "old_target", "new_target"),
+    },
+    "propose_attribute_update": {
+        "category": "repair",
+        "description": "Propose updating a node attribute.",
+        "required_params": ("node_id", "attribute_name", "new_value"),
+    },
+    "request_clarification": {
+        "category": "repair",
+        "description": "Request clarification about the current state.",
+        "required_params": ("question",),
+    },
+}
 
 EA_ACTION_TYPES = {
-    "draft_reply",
-    "reschedule_meeting",
-    "delegate_task",
-    "escalate",
-    "decline_meeting",
+    action_type
+    for action_type, definition in ACTION_DEFINITIONS.items()
+    if definition["category"] == "ea"
 }
 
 REPAIR_ACTION_TYPES = {
-    "flag_inconsistency",
-    "propose_node_removal",
-    "propose_edge_update",
-    "propose_attribute_update",
-    "request_clarification",
+    action_type
+    for action_type, definition in ACTION_DEFINITIONS.items()
+    if definition["category"] == "repair"
 }
 
-VALID_ACTION_TYPES = EA_ACTION_TYPES | REPAIR_ACTION_TYPES
+VALID_ACTION_TYPES = set(ACTION_DEFINITIONS)
+SUPPORTED_ACTION_TYPES = tuple(ACTION_DEFINITIONS.keys())
 
 
 def parse_action(raw_text: str) -> dict[str, Any]:
@@ -46,16 +95,18 @@ def parse_action(raw_text: str) -> dict[str, Any]:
             multiple JSON snippets, markdown fences, or malformed JSON before
             the final valid object.
 
-    Returns:
-        A normalized result dictionary with:
-        - ``action_type``: The validated action type, or ``"parse_error"``
-          when no valid JSON object can be extracted.
-        - ``params``: The parsed params object when available, otherwise an
-          empty dictionary.
-        - ``valid``: ``True`` when both parsing and schema validation succeed,
-          else ``False``.
-        - ``error_message``: ``None`` on success, otherwise a human-readable
-          explanation of the parsing or validation failure.
+        Returns:
+                A normalized result dictionary with:
+                - ``action_type``: The validated action type, or ``"parse_error"``
+                    when no valid JSON object can be extracted.
+                - ``params``: The parsed params object when available, otherwise an
+                    empty dictionary.
+                - ``valid``: ``True`` when both parsing and schema validation succeed,
+                    else ``False``.
+                - ``validation_status``: ``"valid"``, ``"invalid_json"``,
+                    ``"unsupported_action"``, or ``"wrong_parameters"``.
+                - ``error_message``: ``None`` on success, otherwise a human-readable
+                    explanation of the parsing or validation failure.
 
     Edge Cases:
         - If no valid JSON object is found anywhere in the text, the function
@@ -75,10 +126,49 @@ def parse_action(raw_text: str) -> dict[str, Any]:
             "action_type": "parse_error",
             "params": {},
             "valid": False,
+            "validation_status": "invalid_json",
             "error_message": "No valid JSON object found in raw_text.",
+            "missing_params": [],
+            "supported_action_types": list(SUPPORTED_ACTION_TYPES),
         }
 
     return _validate_action_object(parsed_object)
+
+
+def build_action_schema_text() -> str:
+    """Render the explicit action contract shown to the model.
+
+    The text intentionally enumerates the allowed action types and their
+    required parameters so the policy prompt can discourage hallucinated
+    actions such as ``ADD_NODE`` or ``REPAIR_GRAPH``.
+    """
+
+    lines = [
+        "Allowed action_type values:",
+        ", ".join(SUPPORTED_ACTION_TYPES),
+        "",
+        "Required params by action_type:",
+    ]
+
+    for action_type in SUPPORTED_ACTION_TYPES:
+        definition = ACTION_DEFINITIONS[action_type]
+        if "required_params" in definition:
+            requirement_text = ", ".join(definition["required_params"])
+        else:
+            required_any_of = definition.get("required_any_of", ())
+            requirement_text = "one of " + " or ".join(
+                "/".join(option) for option in required_any_of
+            )
+        lines.append(f"- {action_type}: {requirement_text}")
+
+    lines.extend(
+        [
+            "",
+            "Return exactly one JSON object with keys 'action_type' and 'params'.",
+            "Do not invent other action_type values such as ADD_NODE, ADD_EDGE, REPAIR_GRAPH, or LOG_INCONSISTENCY.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _extract_last_json_object(raw_text: str) -> dict[str, Any] | None:
@@ -128,6 +218,34 @@ def _extract_last_json_object(raw_text: str) -> dict[str, Any] | None:
     return last_object
 
 
+def _is_missing(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    return False
+
+
+def _missing_params_for_action(action_type: str, params: dict[str, Any]) -> list[str]:
+    definition = ACTION_DEFINITIONS[action_type]
+    if "required_params" in definition:
+        return [
+            param_name
+            for param_name in definition["required_params"]
+            if param_name not in params or _is_missing(params[param_name])
+        ]
+
+    required_any_of = definition.get("required_any_of", ())
+    for option in required_any_of:
+        if all(param_name in params and not _is_missing(params[param_name]) for param_name in option):
+            return []
+
+    flattened_options = ["/".join(option) for option in required_any_of]
+    return [" or ".join(flattened_options) if flattened_options else "params"]
+
+
 def _validate_action_object(action_object: dict[str, Any]) -> dict[str, Any]:
     """Validate a parsed action object and normalize the result payload."""
 
@@ -139,15 +257,24 @@ def _validate_action_object(action_object: dict[str, Any]) -> dict[str, Any]:
             "action_type": "parse_error",
             "params": {},
             "valid": False,
+            "validation_status": "invalid_json",
             "error_message": "Parsed JSON object is missing a string 'action_type'.",
+            "missing_params": [],
+            "supported_action_types": list(SUPPORTED_ACTION_TYPES),
         }
 
-    if action_type not in VALID_ACTION_TYPES:
+    if action_type not in ACTION_DEFINITIONS:
         return {
             "action_type": action_type,
             "params": params if isinstance(params, dict) else {},
             "valid": False,
-            "error_message": f"Unsupported action_type: {action_type}.",
+            "validation_status": "unsupported_action",
+            "error_message": (
+                f"Unsupported action_type: {action_type}. Allowed action_types: "
+                f"{', '.join(SUPPORTED_ACTION_TYPES)}."
+            ),
+            "missing_params": [],
+            "supported_action_types": list(SUPPORTED_ACTION_TYPES),
         }
 
     if not isinstance(params, dict):
@@ -155,12 +282,33 @@ def _validate_action_object(action_object: dict[str, Any]) -> dict[str, Any]:
             "action_type": action_type,
             "params": {},
             "valid": False,
+            "validation_status": "wrong_parameters",
             "error_message": "Parsed JSON object must contain a 'params' object.",
+            "missing_params": ["params"],
+            "supported_action_types": list(SUPPORTED_ACTION_TYPES),
+        }
+
+    missing_params = _missing_params_for_action(action_type, params)
+    if missing_params:
+        return {
+            "action_type": action_type,
+            "params": params,
+            "valid": False,
+            "validation_status": "wrong_parameters",
+            "error_message": (
+                f"Parsed action_type {action_type} is missing required params: "
+                f"{', '.join(missing_params)}."
+            ),
+            "missing_params": missing_params,
+            "supported_action_types": list(SUPPORTED_ACTION_TYPES),
         }
 
     return {
         "action_type": action_type,
         "params": params,
         "valid": True,
+        "validation_status": "valid",
         "error_message": None,
+        "missing_params": [],
+        "supported_action_types": list(SUPPORTED_ACTION_TYPES),
     }

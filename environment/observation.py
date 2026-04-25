@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from environment.action_parser import build_action_schema_text
+
 
 def estimate_token_count(text: str) -> int:
     """Approximate token usage for a piece of text.
@@ -28,6 +30,7 @@ def build_observation(
     mutation_history: list[Any],
     active_policy_excerpt: str,
     turn_number: int,
+    action_schema_text: str | None = None,
 ) -> str:
     """Build the formatted DriftEnv LLM observation prompt.
 
@@ -52,14 +55,11 @@ def build_observation(
     """
 
     max_tokens = 1200
+    schema_text = action_schema_text or build_action_schema_text()
     section_order = [
         ("TURN", str(turn_number)),
         ("TASK_DESCRIPTION", _normalize_text(task_description)),
-        (
-            "ACTION_SCHEMA",
-            'Respond with exactly one JSON object using the schema '
-            '{"action_type":"<action_name>","params":{...}}.',
-        ),
+        ("ACTION_SCHEMA", schema_text),
         ("ACTIVE_POLICY_EXCERPT", _normalize_text(active_policy_excerpt)),
         ("SUBGRAPH", _normalize_text(subgraph_text)),
         ("INCONSISTENCY_SIGNALS", _format_list_section(inconsistency_signals)),

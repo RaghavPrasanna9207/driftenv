@@ -59,38 +59,26 @@ class StepRequest(BaseModel):
     action: str = Field(
         ...,
         description=(
-            "JSON-encoded action string. Example: "
-            '{"action":"{\\"action_type\\":\\"request_clarification\\",'
-            '\\"params\\":{\\"question\\":\\"Is Marcus still active?\\"}}"}'
+            "Raw model output for the action field. The environment will parse "
+            "and validate the text, so invalid JSON can still be penalized."
         ),
     )
 
     @field_validator("action", mode="before")
     @classmethod
     def normalize_action(cls, value: Any) -> str:
-        """Accept either a JSON string or a JSON object and normalize to a string."""
+        """Accept either a JSON object or raw text and normalize to a string."""
 
         if isinstance(value, (dict, list)):
             return json.dumps(value)
         if not isinstance(value, str):
             raise ValueError(
-                "action must be a JSON-encoded string or a JSON object."
+                "action must be a string or a JSON-serializable object."
             )
 
         normalized = value.strip()
         if not normalized:
             raise ValueError("action must not be empty.")
-
-        try:
-            parsed = json.loads(normalized)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "action must contain valid JSON. On Windows curl, escape inner double "
-                "quotes or send the payload from a file."
-            ) from exc
-
-        if not isinstance(parsed, dict):
-            raise ValueError("action JSON must decode to an object.")
 
         return normalized
 
@@ -131,9 +119,7 @@ async def request_validation_exception_handler(
         content={
             "detail": normalized_errors,
             "message": (
-                "Request body validation failed. Ensure the top-level body is valid JSON. "
-                "For /step on Windows curl, the action field must contain valid escaped JSON "
-                "or be provided as a nested JSON object."
+                "Request body validation failed. Ensure the top-level body is valid JSON."
             ),
         },
     )
@@ -173,7 +159,7 @@ def reset_episode(request: ResetRequest) -> ResetResponse:
 
 @app.post("/step", response_model=StepResponse)
 def step_episode(request: StepRequest) -> StepResponse:
-    """Advance the active DriftEnv episode using a JSON-encoded action string."""
+    """Advance the active DriftEnv episode using the raw action text."""
 
     if current_episode is None:
         raise HTTPException(status_code=400, detail="No active episode. Call /reset first.")
