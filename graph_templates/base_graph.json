@@ -1,1 +1,86 @@
-{}
+{
+  "nodes": [
+    { "id": "P1", "type": "Person", "attributes": { "name": "Marcus", "role": "Engineering Manager", "org_level": "L5", "timezone": "PST", "oo_status": "available", "communication_pref": "slack", "manager_id": "P10" } },
+    { "id": "P2", "type": "Person", "attributes": { "name": "Ananya Rao", "role": "Software Engineer", "org_level": "L3", "timezone": "IST", "oo_status": "busy", "communication_pref": "email", "manager_id": "P1" } },
+    { "id": "P3", "type": "Person", "attributes": { "name": "Rohan Mehta", "role": "Software Engineer", "org_level": "L3", "timezone": "IST", "oo_status": "available", "communication_pref": "slack", "manager_id": "P1" } },
+    { "id": "P4", "type": "Person", "attributes": { "name": "Sophia Chen", "role": "Product Manager", "org_level": "L4", "timezone": "PST", "oo_status": "away", "communication_pref": "zoom", "manager_id": "P10" } },
+    { "id": "P5", "type": "Person", "attributes": { "name": "Arjun Kapoor", "role": "Data Scientist", "org_level": "L3", "timezone": "IST", "oo_status": "available", "communication_pref": "email", "manager_id": "P1" } },
+    { "id": "P6", "type": "Person", "attributes": { "name": "Emily Davis", "role": "UX Designer", "org_level": "L3", "timezone": "EST", "oo_status": "busy", "communication_pref": "slack", "manager_id": "P4" } },
+    { "id": "P7", "type": "Person", "attributes": { "name": "Carlos Gomez", "role": "DevOps Engineer", "org_level": "L3", "timezone": "CET", "oo_status": "available", "communication_pref": "slack", "manager_id": "P1" } },
+    { "id": "P8", "type": "Person", "attributes": { "name": "Nina Patel", "role": "QA Engineer", "org_level": "L2", "timezone": "IST", "oo_status": "available", "communication_pref": "email", "manager_id": "P1" } },
+    { "id": "P9", "type": "Person", "attributes": { "name": "David Kim", "role": "Security Analyst", "org_level": "L3", "timezone": "PST", "oo_status": "busy", "communication_pref": "slack", "manager_id": "P10" } },
+    { "id": "P10", "type": "Person", "attributes": { "name": "Laura Smith", "role": "Director of Engineering", "org_level": "L6", "timezone": "PST", "oo_status": "available", "communication_pref": "zoom", "manager_id": null } },
+
+    { "id": "POL1", "type": "Policy", "attributes": { "name": "Security Policy" } },
+    { "id": "POL2", "type": "Policy", "attributes": { "name": "Data Privacy Policy" } },
+    { "id": "POL3", "type": "Policy", "attributes": { "name": "Code Review Policy" } },
+    { "id": "POL4", "type": "Policy", "attributes": { "name": "Incident Response Policy" } },
+    { "id": "POL5", "type": "Policy", "attributes": { "name": "Remote Work Policy" } },
+
+    { "id": "T1", "type": "Tool", "attributes": { "tool_id": "tool_1", "name": "DeployX", "version": "2.1", "api_schema_version": "v1", "status": "active", "owner_team": "TEAM1" } },
+    { "id": "T2", "type": "Tool", "attributes": { "tool_id": "tool_2", "name": "DataStream", "version": "3.0", "api_schema_version": "v2", "status": "active", "owner_team": "TEAM2" } },
+    { "id": "T3", "type": "Tool", "attributes": { "tool_id": "tool_3", "name": "InsightAI", "version": "1.5", "api_schema_version": "v1", "status": "beta", "owner_team": "TEAM3" } },
+    { "id": "T4", "type": "Tool", "attributes": { "tool_id": "tool_4", "name": "SecureGate", "version": "4.2", "api_schema_version": "v3", "status": "active", "owner_team": "TEAM4" } },
+    { "id": "T5", "type": "Tool", "attributes": { "tool_id": "tool_5", "name": "UXLab", "version": "2.8", "api_schema_version": "v2", "status": "active", "owner_team": "TEAM5" } },
+
+    { "id": "M1", "type": "Meeting", "attributes": { "name": "Sprint Planning" } },
+    { "id": "M2", "type": "Meeting", "attributes": { "name": "Daily Standup" } },
+    { "id": "M3", "type": "Meeting", "attributes": { "name": "Product Sync" } },
+    { "id": "M4", "type": "Meeting", "attributes": { "name": "Incident Review" } },
+    { "id": "M5", "type": "Meeting", "attributes": { "name": "All Hands" } },
+
+    { "id": "TEAM1", "type": "Team", "attributes": { "name": "Platform Team" } },
+    { "id": "TEAM2", "type": "Team", "attributes": { "name": "Data Team" } },
+    { "id": "TEAM3", "type": "Team", "attributes": { "name": "AI Team" } },
+    { "id": "TEAM4", "type": "Team", "attributes": { "name": "Security Team" } },
+    { "id": "TEAM5", "type": "Team", "attributes": { "name": "Design Team" } }
+  ],
+  "edges": [
+    { "source": "P2", "target": "P1", "type": "reports_to" },
+    { "source": "P3", "target": "P1", "type": "reports_to" },
+    { "source": "P5", "target": "P1", "type": "reports_to" },
+    { "source": "P7", "target": "P1", "type": "reports_to" },
+    { "source": "P8", "target": "P1", "type": "reports_to" },
+    { "source": "P1", "target": "P10", "type": "reports_to" },
+    { "source": "P4", "target": "P10", "type": "reports_to" },
+    { "source": "P6", "target": "P4", "type": "reports_to" },
+    { "source": "P9", "target": "P10", "type": "reports_to" },
+
+    { "source": "TEAM1", "target": "T1", "type": "owns_tool" },
+    { "source": "TEAM2", "target": "T2", "type": "owns_tool" },
+    { "source": "TEAM3", "target": "T3", "type": "owns_tool" },
+    { "source": "TEAM4", "target": "T4", "type": "owns_tool" },
+    { "source": "TEAM5", "target": "T5", "type": "owns_tool" },
+
+    { "source": "P1", "target": "POL3", "type": "governed_by" },
+    { "source": "P2", "target": "POL3", "type": "governed_by" },
+    { "source": "P3", "target": "POL3", "type": "governed_by" },
+    { "source": "P5", "target": "POL2", "type": "governed_by" },
+    { "source": "P7", "target": "POL1", "type": "governed_by" },
+    { "source": "P9", "target": "POL1", "type": "governed_by" },
+    { "source": "P4", "target": "POL5", "type": "governed_by" },
+    { "source": "P6", "target": "POL5", "type": "governed_by" },
+
+    { "source": "P1", "target": "M1", "type": "attends" },
+    { "source": "P2", "target": "M1", "type": "attends" },
+    { "source": "P3", "target": "M1", "type": "attends" },
+    { "source": "P4", "target": "M3", "type": "attends" },
+    { "source": "P5", "target": "M2", "type": "attends" },
+    { "source": "P6", "target": "M3", "type": "attends" },
+    { "source": "P7", "target": "M2", "type": "attends" },
+    { "source": "P8", "target": "M2", "type": "attends" },
+    { "source": "P9", "target": "M4", "type": "attends" },
+    { "source": "P10", "target": "M5", "type": "attends" },
+
+    { "source": "P1", "target": "P2", "type": "delegates_to" },
+    { "source": "P1", "target": "P3", "type": "delegates_to" },
+    { "source": "P1", "target": "P5", "type": "delegates_to" },
+    { "source": "P4", "target": "P6", "type": "delegates_to" },
+    { "source": "P10", "target": "P1", "type": "delegates_to" },
+    { "source": "P10", "target": "P4", "type": "delegates_to" },
+    { "source": "P1", "target": "P7", "type": "delegates_to" },
+    { "source": "P1", "target": "P8", "type": "delegates_to" },
+    { "source": "P4", "target": "P9", "type": "delegates_to" },
+    { "source": "P10", "target": "P9", "type": "delegates_to" }
+  ]
+}
