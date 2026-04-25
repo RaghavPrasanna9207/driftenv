@@ -12,16 +12,18 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
     """Score action correctness against a ground-truth action specification.
 
     This reward is intended for high-level action validation in DriftEnv. The
-    function evaluates three independent aspects of an agent action and returns
-    the arithmetic mean of their scores, clamped to the inclusive range
+    function evaluates applicable aspects of an agent action and returns the
+    arithmetic mean of their scores, clamped to the inclusive range
     ``[0.0, 1.0]``:
 
     1. Stakeholder correctness:
        The function looks for stakeholder identifiers in the action under the
        keys ``"stakeholders"``, ``"referenced_stakeholders"``,
        ``"stakeholder_ids"``, or ``"targets"``. The same keys are checked in the
-       ground truth. A set-based F1 score is used so that missing stakeholders
-       and extra stakeholders are both penalized.
+       ground truth. A set-based F1 score is used when explicit stakeholder
+       targets are available. When no explicit stakeholder targets are
+       available, actions can still receive partial credit when referenced
+       stakeholders are valid nodes in the allowed graph context.
     2. Required field completion:
        The function looks for required field names in the ground truth under the
        keys ``"required_fields"`` or ``"expected_fields"``. It also accepts a
@@ -36,9 +38,10 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
        ``"route_nodes"``. Valid routing constraints are read from the ground
        truth using ``"valid_nodes"``, ``"allowed_nodes"``, ``"route_nodes"``,
        ``"nodes"``, ``"valid_edges"``, ``"allowed_edges"``, ``"route_edges"``,
-       or ``"edges"``. When valid nodes are provided, the node portion of the
-       score is the fraction of visited route nodes that are allowed. When valid
-       directed edges are provided, the edge portion of the score is the
+       or ``"edges"``. Routing is only scored when the action actually supplies
+       a route-like field. When valid nodes are provided, the node portion of
+       the score is the fraction of visited route nodes that are allowed. When
+       valid directed edges are provided, the edge portion of the score is the
        fraction of consecutive route hops that are allowed. If both node and
        edge constraints are present, the routing score is their average.
 
@@ -56,9 +59,11 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
 
     Edge Cases:
         - If both the action and ground truth omit a scored section, that
-          section receives full credit because there is nothing to validate.
+          section is skipped rather than receiving automatic credit.
         - If the ground truth requires stakeholders, fields, or routing but the
           action omits that section, the corresponding sub-score is ``0.0``.
+        - If none of the three sections are applicable, the function returns
+          ``0.0``.
         - Empty strings, ``None``, empty containers, and missing keys are all
           treated as incomplete field values.
         - If route constraints are provided but the route contains only one
@@ -105,33 +110,61 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
             return list(value)
         return [value]
 
-    action_stakeholders = to_set(
-        pick(
-            action,
-            ("stakeholders", "referenced_stakeholders", "stakeholder_ids", "targets"),
-        )
+    component_scores: list[float] = []
+
+    valid_nodes = to_set(
+        pick(ground_truth, ("valid_nodes", "allowed_nodes", "route_nodes", "nodes"))
     )
-    truth_stakeholders = to_set(
-        pick(
-            ground_truth,
-            ("stakeholders", "referenced_stakeholders", "stakeholder_ids", "targets"),
-        )
+    valid_edges_raw = pick(
+        ground_truth,
+        ("valid_edges", "allowed_edges", "route_edges", "edges"),
     )
-    stakeholder_overlap = len(action_stakeholders & truth_stakeholders)
-    if not action_stakeholders and not truth_stakeholders:
-        stakeholder_score = 1.0
-    elif not action_stakeholders or not truth_stakeholders:
-        stakeholder_score = 0.0
-    else:
-        stakeholder_precision = stakeholder_overlap / len(action_stakeholders)
-        stakeholder_recall = stakeholder_overlap / len(truth_stakeholders)
-        stakeholder_denominator = stakeholder_precision + stakeholder_recall
+    valid_edges: set[tuple[Any, Any]] = set()
+    for edge in to_list(valid_edges_raw):
+        if isinstance(edge, (list, tuple)) and len(edge) == 2:
+            valid_edges.add((edge[0], edge[1]))
+
+    action_stakeholder_value = pick(
+        action,
+        ("stakeholders", "referenced_stakeholders", "stakeholder_ids", "targets"),
+    )
+    truth_stakeholder_value = pick(
+        ground_truth,
+        ("stakeholders", "referenced_stakeholders", "stakeholder_ids", "targets"),
+    )
+    stakeholder_applicable = (
+        action_stakeholder_value is not None or truth_stakeholder_value is not None
+    )
+    if stakeholder_applicable:
+        action_stakeholders = to_set(action_stakeholder_value)
+        truth_stakeholders = to_set(truth_stakeholder_value)
+        stakeholder_parts: list[float] = []
+
+        if truth_stakeholders:
+            stakeholder_overlap = len(action_stakeholders & truth_stakeholders)
+            if not action_stakeholders:
+                stakeholder_parts.append(0.0)
+            else:
+                stakeholder_precision = stakeholder_overlap / len(action_stakeholders)
+                stakeholder_recall = stakeholder_overlap / len(truth_stakeholders)
+                stakeholder_denominator = stakeholder_precision + stakeholder_recall
+                stakeholder_parts.append(
+                    0.0
+                    if stakeholder_denominator == 0.0
+                    else (2.0 * stakeholder_precision * stakeholder_recall)
+                    / stakeholder_denominator
+                )
+
+        if not truth_stakeholders and action_stakeholders and valid_nodes:
+            valid_stakeholder_hits = sum(
+                1 for stakeholder in action_stakeholders if stakeholder in valid_nodes
+            )
+            stakeholder_parts.append(valid_stakeholder_hits / len(action_stakeholders))
+
         stakeholder_score = (
-            0.0
-            if stakeholder_denominator == 0.0
-            else (2.0 * stakeholder_precision * stakeholder_recall)
-            / stakeholder_denominator
+            sum(stakeholder_parts) / len(stakeholder_parts) if stakeholder_parts else 0.0
         )
+        component_scores.append(stakeholder_score)
 
     required_field_values = pick(
         ground_truth,
@@ -145,9 +178,7 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
     action_fields = action.get("fields")
     if not isinstance(action_fields, dict):
         action_fields = {}
-    if not required_fields:
-        field_score = 1.0
-    else:
+    if required_fields:
         completed_fields = 0
         for field_name in required_fields:
             if field_name in action and not is_missing(action[field_name]):
@@ -155,44 +186,36 @@ def compute_r1(action: dict[str, Any], ground_truth: dict[str, Any]) -> float:
             elif field_name in action_fields and not is_missing(action_fields[field_name]):
                 completed_fields += 1
         field_score = completed_fields / len(required_fields)
+        component_scores.append(field_score)
 
-    route_nodes = to_list(
-        pick(action, ("route", "routing_path", "path", "nodes", "route_nodes"))
-    )
-    valid_nodes = to_set(
-        pick(ground_truth, ("valid_nodes", "allowed_nodes", "route_nodes", "nodes"))
-    )
-    valid_edges_raw = pick(
-        ground_truth,
-        ("valid_edges", "allowed_edges", "route_edges", "edges"),
-    )
-    valid_edges: set[tuple[Any, Any]] = set()
-    for edge in to_list(valid_edges_raw):
-        if isinstance(edge, (list, tuple)) and len(edge) == 2:
-            valid_edges.add((edge[0], edge[1]))
+    route_value = pick(action, ("route", "routing_path", "path", "nodes", "route_nodes"))
+    route_nodes = to_list(route_value)
+    routing_is_applicable = route_value is not None
+    if routing_is_applicable:
+        routing_components: list[float] = []
+        if valid_nodes:
+            if not route_nodes:
+                routing_components.append(0.0)
+            else:
+                valid_node_hits = sum(1 for node in route_nodes if node in valid_nodes)
+                routing_components.append(valid_node_hits / len(route_nodes))
+        if valid_edges:
+            if not route_nodes:
+                routing_components.append(0.0)
+            elif len(route_nodes) == 1:
+                routing_components.append(1.0)
+            else:
+                traversed_edges = list(zip(route_nodes[:-1], route_nodes[1:]))
+                valid_edge_hits = sum(1 for edge in traversed_edges if edge in valid_edges)
+                routing_components.append(valid_edge_hits / len(traversed_edges))
+        if routing_components:
+            routing_score = sum(routing_components) / len(routing_components)
+            component_scores.append(routing_score)
 
-    routing_components: list[float] = []
-    if valid_nodes:
-        if not route_nodes:
-            routing_components.append(0.0)
-        else:
-            valid_node_hits = sum(1 for node in route_nodes if node in valid_nodes)
-            routing_components.append(valid_node_hits / len(route_nodes))
-    if valid_edges:
-        if not route_nodes:
-            routing_components.append(0.0)
-        elif len(route_nodes) == 1:
-            routing_components.append(1.0)
-        else:
-            traversed_edges = list(zip(route_nodes[:-1], route_nodes[1:]))
-            valid_edge_hits = sum(1 for edge in traversed_edges if edge in valid_edges)
-            routing_components.append(valid_edge_hits / len(traversed_edges))
-    if routing_components:
-        routing_score = sum(routing_components) / len(routing_components)
-    else:
-        routing_score = 1.0
+    if not component_scores:
+        return 0.0
 
-    total_score = (stakeholder_score + field_score + routing_score) / 3.0
+    total_score = sum(component_scores) / len(component_scores)
     return max(0.0, min(1.0, total_score))
 
 
@@ -324,7 +347,8 @@ def compute_r4(proposed_edits: list[Any], ground_truth_delta: list[Any]) -> floa
         - Duplicate edit entries are ignored so repeated items cannot game the
           reward.
         - If no repair is required and no edit is proposed, the function returns
-          ``1.0`` because the empty repair plan is correct.
+          ``0.0`` so the absence of repair work is treated as neutral rather
+          than as a perfect repair.
         - If no repair is required but edits are still proposed, the agent is
           penalized and the result is clamped at ``-0.5`` on the low end.
         - Unhashable edit structures are converted into stable canonical tuples
@@ -349,7 +373,7 @@ def compute_r4(proposed_edits: list[Any], ground_truth_delta: list[Any]) -> floa
     truth_set = {canonicalize(edit) for edit in ground_truth_delta}
 
     if not truth_set and not proposed_set:
-        return 1.0
+        return 0.0
 
     correct_repairs = len(proposed_set & truth_set)
     incorrect_repairs = len(proposed_set - truth_set)
