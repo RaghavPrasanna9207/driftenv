@@ -160,3 +160,78 @@ def test_random_agent_runs_three_full_driftenv_episodes() -> None:
     assert saw_proposed_edits
     assert saw_nonzero_r3
     assert saw_positive_r4
+
+
+def test_issue_id_is_not_validated_as_a_graph_node() -> None:
+    env = DriftEnv(episode_type="manager_departure", curriculum_stage=1, seed=0)
+    env.reset()
+
+    step_result = env.step(
+        json.dumps(
+            {
+                "action_type": "escalate",
+                "params": {
+                    "issue_id": "ISSUE-1",
+                    "target_id": "P1",
+                },
+            }
+        )
+    )
+
+    action_result = step_result["info"]["action_result"]
+
+    assert action_result["success"] is True
+    assert not any(
+        "Action references unknown or missing graph nodes" in signal
+        for signal in action_result["inconsistency_signals"]
+    )
+
+
+def test_task_id_is_not_validated_as_a_graph_node() -> None:
+    env = DriftEnv(episode_type="manager_departure", curriculum_stage=1, seed=0)
+    env.reset()
+
+    step_result = env.step(
+        json.dumps(
+            {
+                "action_type": "delegate_task",
+                "params": {
+                    "task_id": "TASK-1",
+                    "assignee_id": "P3",
+                },
+            }
+        )
+    )
+
+    action_result = step_result["info"]["action_result"]
+
+    assert action_result["success"] is True
+    assert not any(
+        "Action references unknown or missing graph nodes" in signal
+        for signal in action_result["inconsistency_signals"]
+    )
+
+
+def test_invalid_graph_node_ids_are_still_rejected() -> None:
+    env = DriftEnv(episode_type="manager_departure", curriculum_stage=1, seed=0)
+    env.reset()
+
+    step_result = env.step(
+        json.dumps(
+            {
+                "action_type": "escalate",
+                "params": {
+                    "issue_id": "ISSUE-1",
+                    "target_id": "P999",
+                },
+            }
+        )
+    )
+
+    action_result = step_result["info"]["action_result"]
+
+    assert action_result["success"] is False
+    assert any(
+        "Action references unknown or missing graph nodes: P999." in signal
+        for signal in action_result["inconsistency_signals"]
+    )

@@ -20,6 +20,21 @@ from environment.reward import (
     compute_r5,
 )
 
+GRAPH_BOUND_PARAM_FIELDS = {
+    "assignee_id",
+    "from_node_id",
+    "meeting_id",
+    "new_target",
+    "node_id",
+    "old_target",
+    "recipient_id",
+    "source",
+    "target_id",
+    "to_node_id",
+}
+
+GRAPH_BOUND_LIST_PARAM_FIELDS = {"node_ids"}
+
 
 class OpenEnv(ABC):
     """Minimal interface for interactive step-based environments."""
@@ -798,13 +813,13 @@ class DriftEnv(OpenEnv):
 
     @staticmethod
     def _extract_referenced_nodes(params: dict[str, Any]) -> list[Any]:
-        """Extract likely graph node references from action params."""
+        """Extract graph-backed node references from action params."""
 
         referenced: list[Any] = []
         for key, value in params.items():
-            if key.endswith("_id") and value is not None:
+            if key in GRAPH_BOUND_PARAM_FIELDS and value is not None:
                 referenced.append(value)
-            elif key.endswith("_ids") and isinstance(value, list):
+            elif key in GRAPH_BOUND_LIST_PARAM_FIELDS and isinstance(value, list):
                 referenced.extend(item for item in value if item is not None)
         return referenced
 

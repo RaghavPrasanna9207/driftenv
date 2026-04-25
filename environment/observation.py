@@ -55,6 +55,11 @@ def build_observation(
     section_order = [
         ("TURN", str(turn_number)),
         ("TASK_DESCRIPTION", _normalize_text(task_description)),
+        (
+            "ACTION_SCHEMA",
+            'Respond with exactly one JSON object using the schema '
+            '{"action_type":"<action_name>","params":{...}}.',
+        ),
         ("ACTIVE_POLICY_EXCERPT", _normalize_text(active_policy_excerpt)),
         ("SUBGRAPH", _normalize_text(subgraph_text)),
         ("INCONSISTENCY_SIGNALS", _format_list_section(inconsistency_signals)),
