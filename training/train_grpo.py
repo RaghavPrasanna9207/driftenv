@@ -338,6 +338,17 @@ def save_and_push_merged_model(
     )
 
 
+def _ensure_trl_model_warnings_issued(model: Any) -> None:
+    """TRL ``GRPOTrainer`` sets ``model.warnings_issued['estimate_tokens']`` (``PreTrainedModel`` field).
+
+    ``PeftModel`` forwards missing attrs to the base LLM, which has no ``warnings_issued``, so bind a dict
+    on the PEFT wrapper instance.
+    """
+    if "warnings_issued" in getattr(model, "__dict__", {}):
+        return
+    object.__setattr__(model, "warnings_issued", {})
+
+
 def main() -> None:
     """Run end-to-end GRPO training, merged export, and Hub upload."""
 
@@ -411,6 +422,7 @@ def main() -> None:
         report_to="none",  # Keep the script self-contained unless the user wires in an experiment tracker.
     )
 
+    _ensure_trl_model_warnings_issued(model)
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
