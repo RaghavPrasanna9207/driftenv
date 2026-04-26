@@ -14,6 +14,46 @@ ACTION_FAILURE_PENALTIES = {
     "wrong_parameters": -0.5,
 }
 
+# Strengthens contrast between valid actions and “safe” but wrong ones during RL.
+R2_ENV_DOMINANCE_SCALE = 0.3  # applied to raw r2 before it enters the weighted sum
+R1_IMPORTANCE_SCALE = 1.08  # multiplicative on r1 in [0,1] before weighting; capped below
+FORMAT_BONUS_VALID = 0.05
+EXPLORATION_BONUS = 0.05
+
+# Parameters whose values are graph node ids (issue_id, meeting_id, task_id, etc. are not validated).
+NODE_REFERENCE_PARAM_KEYS = frozenset(
+    {
+        "node_id",
+        "source",
+        "old_target",
+        "new_target",
+        "target_id",
+        "recipient_id",
+        "assignee_id",
+        "from_node_id",
+        "to_node_id",
+    }
+)
+
+
+def compute_graph_node_reference_penalty(params: dict[str, Any], valid_graph_node_ids: set[str]) -> float:
+    """Strong negative when graph-bound fields reference a node that does not exist in the live graph."""
+
+    if not valid_graph_node_ids or not isinstance(params, dict):
+        return 0.0
+    invalid_count = 0
+    for key, value in params.items():
+        if key in NODE_REFERENCE_PARAM_KEYS and value is not None:
+            if str(value) not in valid_graph_node_ids:
+                invalid_count += 1
+        if key == "node_ids" and isinstance(value, list):
+            for item in value:
+                if str(item) not in valid_graph_node_ids:
+                    invalid_count += 1
+    if invalid_count == 0:
+        return 0.0
+    return max(-0.75, -0.4 * min(invalid_count, 2))
+
 
 def compute_action_failure_penalty(validation_status: str) -> float:
     """Return the penalty for a structurally invalid action.
@@ -332,45 +372,27 @@ def compute_r3(flagged_nodes: list[Any], mutated_nodes: list[Any]) -> float:
     flagged_set = {canonicalize(node) for node in flagged_nodes}
     mutated_set = {canonicalize(node) for node in mutated_nodes}
 
-    true_positives = len(flagged_set & mutated_set)
-    false_positives = len(flagged_set - mutated_set)
-    if true_positives == 0 and false_positives == 0:
+    if not mutated_set:
         return 0.0
-    return true_positives / (true_positives + false_positives)
+    if not flagged_set:
+        return 0.0
+
+    true_positives = len(flagged_set & mutated_set)
+    if true_positives == 0:
+        return 0.0
+
+    precision = true_positives / len(flagged_set) if flagged_set else 0.0
+    recall = true_positives / len(mutated_set)
+    if precision + recall < 1e-12:
+        return 0.0
+    return (2.0 * precision * recall) / (precision + recall)
 
 
 def compute_r4(proposed_edits: list[Any], ground_truth_delta: list[Any]) -> float:
-    """Score repair quality against the expected change set.
+    """Score repair quality: strong positive when repairs match the delta, negative when wrong.
 
-    Proposed repairs are compared against the required repair delta using
-    canonicalized, deduplicated edit entries. Each unique correct edit receives
-    ``+1.0`` and each unique incorrect edit receives ``-0.5``. The raw score is
-    then normalized by the number of unique ground-truth repairs so the result
-    behaves like a proportion of required work completed. Finally, the value is
-    clamped to ``[-0.5, 1.0]``.
-
-    Args:
-        proposed_edits: Repairs suggested or applied by the agent. Entries may
-            be strings, tuples, dictionaries, or other Python values.
-        ground_truth_delta: The set of repairs that were actually needed.
-
-    Returns:
-        A float in ``[-0.5, 1.0]``.
-        - ``1.0`` means all required repairs were proposed with no extra edits.
-        - Values between ``0.0`` and ``1.0`` indicate partial correctness.
-        - Negative values indicate the agent proposed more harmful or spurious
-          edits than useful ones.
-
-    Edge Cases:
-        - Duplicate edit entries are ignored so repeated items cannot game the
-          reward.
-        - If no repair is required and no edit is proposed, the function returns
-          ``0.0`` so the absence of repair work is treated as neutral rather
-          than as a perfect repair.
-        - If no repair is required but edits are still proposed, the agent is
-          penalized and the result is clamped at ``-0.5`` on the low end.
-        - Unhashable edit structures are converted into stable canonical tuples
-          before comparison.
+    Uses repair-set F1 with a 0.6 max positive, plus a spurious penalty, clamped
+    to ``[-0.5, 0.6]`` so r4 is not a constant negative during RL.
     """
 
     def canonicalize(value: Any) -> Hashable:
@@ -392,12 +414,27 @@ def compute_r4(proposed_edits: list[Any], ground_truth_delta: list[Any]) -> floa
 
     if not truth_set and not proposed_set:
         return 0.0
+    if not truth_set and proposed_set:
+        return -min(0.45, 0.2 + 0.12 * max(0, len(proposed_set) - 1))
+    if truth_set and not proposed_set:
+        return -0.35
 
-    correct_repairs = len(proposed_set & truth_set)
-    incorrect_repairs = len(proposed_set - truth_set)
-    denominator = len(truth_set) if truth_set else 1
-    raw_score = (correct_repairs - 0.5 * incorrect_repairs) / denominator
-    return max(-0.5, min(1.0, raw_score))
+    true_pos = len(proposed_set & truth_set)
+    false_pos = len(proposed_set - truth_set)
+    if true_pos == 0:
+        return -0.45
+
+    precision = true_pos / len(proposed_set) if proposed_set else 0.0
+    recall = true_pos / len(truth_set)
+    f1 = (
+        0.0
+        if (precision + recall) < 1e-12
+        else (2.0 * precision * recall) / (precision + recall)
+    )
+    positive = 0.6 * f1
+    spurious_penalty = 0.45 * (false_pos / max(len(proposed_set), 1))
+    raw = positive - spurious_penalty
+    return max(-0.5, min(0.6, raw))
 
 
 def compute_r5(repair_steps_taken: int, minimum_required_steps: int) -> float:
@@ -432,25 +469,73 @@ def compute_r5(repair_steps_taken: int, minimum_required_steps: int) -> float:
     return 1.0 / (1.0 + max(0, repair_steps_taken - minimum_required_steps))
 
 
+def compute_repetition_penalty(repeat_streak: int) -> float:
+    """Penalty grows after the first repeat; 3+ consecutive same action_type is heavily penalized."""
+
+    if repeat_streak < 2:
+        return 0.0
+    if repeat_streak == 2:
+        return -0.1
+    if repeat_streak == 3:
+        return -0.3
+    if repeat_streak == 4:
+        return -0.5
+    return -0.75
+
+
+def build_format_bonus(valid: bool) -> float:
+    """Small bonus for schema-valid actions (stabilizes early RL)."""
+
+    return FORMAT_BONUS_VALID if valid else 0.0
+
+
+def build_exploration_bonus(
+    last_valid_action_type: str | None,
+    current_action_type: str | None,
+) -> float:
+    if last_valid_action_type is None or current_action_type is None:
+        return 0.0
+    return EXPLORATION_BONUS if current_action_type != last_valid_action_type else 0.0
+
+
+def action_repeat_key(validation_status: str, action_type: str, valid: bool) -> str:
+    """Key used to detect repeated behavior including invalid/parse failures."""
+
+    if not valid:
+        return f"invalid:{validation_status}"
+    return f"ok:{action_type}"
+
+
+def assemble_step_reward(
+    r1: float,
+    r2: float,
+    r3: float,
+    r4: float,
+    r5: float,
+    *,
+    format_bonus: float,
+    repetition_penalty: float,
+    invalid_node_penalty: float = 0.0,
+    exploration_bonus: float = 0.0,
+) -> float:
+    """Blend r1..r5 with r3 weighted higher for mutation detection."""
+
+    r1_adj = min(1.0, r1 * R1_IMPORTANCE_SCALE)
+    r2_adj = r2 * R2_ENV_DOMINANCE_SCALE
+    return (
+        0.28 * r1_adj
+        + 0.09 * r2_adj
+        + 0.25 * r3
+        + 0.19 * r4
+        + 0.10 * r5
+        + float(format_bonus)
+        + float(repetition_penalty)
+        + float(invalid_node_penalty)
+        + float(exploration_bonus)
+    )
+
+
 def compute_total_reward(r1: float, r2: float, r3: float, r4: float, r5: float) -> float:
-    """Compute the weighted DriftEnv reward from component rewards.
-
-    Args:
-        r1: Action-validity reward.
-        r2: Graph-state similarity reward.
-        r3: Mutation-flagging precision reward.
-        r4: Repair-quality reward.
-        r5: Repair-efficiency reward.
-
-    Returns:
-        The weighted sum ``0.25 * r1 + 0.25 * r2 + 0.20 * r3 + 0.20 * r4 +
-        0.10 * r5``.
-
-    Edge Cases:
-        - The function does not clamp the final value. If callers pass values
-          outside their expected ranges, the weighted sum will reflect that.
-        - The function performs no type coercion beyond normal Python numeric
-          semantics.
-    """
+    """Legacy weighted sum without repetition or format terms (kept for callers/tests)."""
 
     return 0.25 * r1 + 0.25 * r2 + 0.20 * r3 + 0.20 * r4 + 0.10 * r5

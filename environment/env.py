@@ -20,12 +20,19 @@ from environment.action_parser import (
 from environment.graph_engine import GraphEngine
 from environment.observation import build_observation
 from environment.reward import (
+    R2_ENV_DOMINANCE_SCALE,
+    action_repeat_key,
+    assemble_step_reward,
+    build_exploration_bonus,
+    build_format_bonus,
     compute_action_failure_penalty,
+    compute_graph_node_reference_penalty,
     compute_r1,
     compute_r2,
     compute_r3,
     compute_r4,
     compute_r5,
+    compute_repetition_penalty,
 )
 
 GRAPH_BOUND_PARAM_FIELDS = {
@@ -43,8 +50,52 @@ GRAPH_BOUND_PARAM_FIELDS = {
 
 GRAPH_BOUND_LIST_PARAM_FIELDS = {"node_ids"}
 
+EPISODE_TASKS: dict[str, list[dict[str, Any]]] = {
+    "manager_departure": [
+        {
+            "task_id": "TASK-EP01-1",
+            "action_type": "draft_reply",
+            "route_to": "P1",
+            "recipient_name": "Marcus",
+            "prompt": "Route a status update to Marcus about the current sprint blockers.",
+        },
+        {
+            "task_id": "TASK-EP01-2",
+            "action_type": "delegate_task",
+            "route_to": "P1",
+            "assignee_name": "Marcus",
+            "prompt": "Route a follow-up approval task to Marcus for review.",
+        },
+    ],
+    "policy_injection": [
+        {
+            "task_id": "TASK-EP02-1",
+            "action_type": "draft_reply",
+            "recipient_region": "US",
+            "data_region": "EU",
+            "prompt": (
+                "Draft a customer update that sends EU customer incident details to a "
+                "US-based external recipient."
+            ),
+        },
+        {
+            "task_id": "TASK-EP02-2",
+            "action_type": "draft_reply",
+            "recipient_region": "APAC",
+            "data_region": "EU",
+            "prompt": (
+                "Draft an internal handoff that shares EU user export data with an "
+                "APAC operations mailbox."
+            ),
+        },
+    ],
+}
+
 
 logger = logging.getLogger(__name__)
+
+# Temporary: print per-step reward decompositions for the first N steps of each episode.
+REWARD_DEBUG_LOG_STEPS = 4
 
 
 class OpenEnv(ABC):
@@ -108,6 +159,9 @@ class DriftEnv(OpenEnv):
         self.repair_steps_taken = 0
         self.last_action_result: dict[str, Any] = {"success": False, "inconsistency_signals": []}
         self.latest_focus_nodes: list[Any] = ["P1"]
+        self._last_action_repeat_key: str | None = None
+        self._consecutive_action_repeat_streak: int = 0
+        self._last_valid_action_type: str | None = None
 
     def reset(self) -> str:
         """Start a fresh episode and return the initial observation string."""
@@ -123,6 +177,9 @@ class DriftEnv(OpenEnv):
         self.pending_ground_truth_delta = []
         self.repair_steps_taken = 0
         self.last_action_result = {"success": False, "inconsistency_signals": []}
+        self._last_action_repeat_key = None
+        self._consecutive_action_repeat_streak = 0
+        self._last_valid_action_type = None
 
         self.graph_engine.load_graph(str(self.base_graph_path))
         self.reference_engine.load_graph(str(self.base_graph_path))
@@ -131,6 +188,47 @@ class DriftEnv(OpenEnv):
         self.latest_focus_nodes = ["P1"]
 
         return self._build_observation([])
+
+    def get_tasks(self) -> list[dict[str, Any]]:
+        """Return static task cards for the active episode type."""
+
+        return [dict(task) for task in EPISODE_TASKS.get(self.episode_type, [])]
+
+    def get_state_snapshot(self) -> dict[str, Any]:
+        """Return a compact snapshot of current episode state for API clients."""
+
+        mutation_schedule = [
+            {"turn": turn, "mutation_type": mutation_type, "params": dict(params)}
+            for turn, mutation_type, params in self.mutation_schedule
+        ]
+        return {
+            "episode_type": self.episode_type,
+            "curriculum_stage": self.curriculum_stage,
+            "seed": self.seed,
+            "turn": self.turn,
+            "done": self.done,
+            "tasks_resolved": self.tasks_resolved,
+            "mutation_schedule": mutation_schedule,
+            "mutation_history": list(self.mutation_history),
+            "active_inconsistency_signals": list(self.active_inconsistency_signals),
+            "flagged_nodes": list(self.flagged_nodes),
+            "mutated_nodes": list(self.mutated_nodes),
+            "pending_ground_truth_delta_count": len(self.pending_ground_truth_delta),
+            "live_graph_node_count": self.graph_engine.graph.number_of_nodes(),
+            "live_graph_edge_count": self.graph_engine.graph.number_of_edges(),
+            "valid_node_ids": sorted((str(node_id) for node_id in self.graph_engine.graph.nodes()), key=str),
+        }
+
+    def _advance_action_repeat_streak(self, key: str) -> tuple[int, float]:
+        """Update consecutive repeat count for ``key``; return (streak, penalty < 0)."""
+
+        if self._last_action_repeat_key is None or key != self._last_action_repeat_key:
+            new_streak = 1
+        else:
+            new_streak = self._consecutive_action_repeat_streak + 1
+        self._last_action_repeat_key = key
+        self._consecutive_action_repeat_streak = new_streak
+        return new_streak, compute_repetition_penalty(new_streak)
 
     def step(self, action_text: str) -> dict[str, Any]:
         """Process one agent action, apply due mutations, and compute rewards.
@@ -155,6 +253,11 @@ class DriftEnv(OpenEnv):
                         "r3": 0.0,
                         "r4": 0.0,
                         "r5": 0.0,
+                        "r2_scaled": 0.0,
+                        "repetition_penalty": 0.0,
+                        "format_bonus": 0.0,
+                        "invalid_node_penalty": 0.0,
+                        "exploration_bonus": 0.0,
                     }
                 },
             }
@@ -176,7 +279,14 @@ class DriftEnv(OpenEnv):
         self._apply_scheduled_mutations(self.turn)
 
         if not parsed_action.get("valid", False):
-            penalty = compute_action_failure_penalty(validation_status)
+            repeat_key = action_repeat_key(
+                validation_status,
+                str(parsed_action.get("action_type", "parse_error")),
+                valid=False,
+            )
+            _streak, repetition_penalty = self._advance_action_repeat_streak(repeat_key)
+            base_failure = compute_action_failure_penalty(validation_status)
+            reward = base_failure + repetition_penalty
             self.last_action_result = {
                 "success": False,
                 "validation_status": validation_status,
@@ -191,14 +301,26 @@ class DriftEnv(OpenEnv):
             combined_signals = list(self.active_inconsistency_signals)
             combined_signals.extend(self.last_action_result["inconsistency_signals"])
             observation = self._build_observation(combined_signals)
+            if self.turn - 1 <= REWARD_DEBUG_LOG_STEPS:
+                print(
+                    "[reward_debug] turn=%s key=%r reward=%.4f base_failure=%.4f rep_pen=%.4f valid=False status=%r"
+                    % (
+                        self.turn - 1,
+                        repeat_key,
+                        reward,
+                        base_failure,
+                        repetition_penalty,
+                        validation_status,
+                    )
+                )
 
             return {
                 "observation": observation,
-                "reward": penalty,
+                "reward": reward,
                 "done": self.done,
                 "info": {
                     "reward_breakdown": {
-                        "validation_penalty": penalty,
+                        "validation_penalty": base_failure,
                         "reason": validation_status,
                         "error_message": parsed_action.get("error_message"),
                         "r1": 0.0,
@@ -206,6 +328,11 @@ class DriftEnv(OpenEnv):
                         "r3": 0.0,
                         "r4": 0.0,
                         "r5": 0.0,
+                        "r2_scaled": 0.0,
+                        "repetition_penalty": repetition_penalty,
+                        "format_bonus": 0.0,
+                        "invalid_node_penalty": 0.0,
+                        "exploration_bonus": 0.0,
                     },
                     "parsed_action": parsed_action,
                     "validation_result": validation_result,
@@ -231,7 +358,29 @@ class DriftEnv(OpenEnv):
         r4 = compute_r4(self.proposed_edits, self.pending_ground_truth_delta)
         repair_steps_taken, minimum_required_steps = self._repair_efficiency_inputs()
         r5 = compute_r5(repair_steps_taken, minimum_required_steps)
-        reward = (0.25 * r1) + (0.25 * r2) + (0.20 * r3) + (0.20 * r4) + (0.10 * r5)
+        r2_scaled = r2 * R2_ENV_DOMINANCE_SCALE
+        repeat_key = action_repeat_key(validation_status, str(parsed_action.get("action_type", "parse_error")), True)
+        _streak, repetition_penalty = self._advance_action_repeat_streak(repeat_key)
+        format_bonus = build_format_bonus(True)
+        valid_node_id_set = {str(n) for n in self.graph_engine.graph.nodes()}
+        params = parsed_action.get("params", {})
+        if not isinstance(params, dict):
+            params = {}
+        invalid_node_penalty = compute_graph_node_reference_penalty(params, valid_node_id_set)
+        current_type = str(parsed_action.get("action_type", "parse_error"))
+        exploration_bonus = build_exploration_bonus(self._last_valid_action_type, current_type)
+        reward = assemble_step_reward(
+            r1,
+            r2,
+            r3,
+            r4,
+            r5,
+            format_bonus=format_bonus,
+            repetition_penalty=repetition_penalty,
+            invalid_node_penalty=invalid_node_penalty,
+            exploration_bonus=exploration_bonus,
+        )
+        self._last_valid_action_type = current_type
 
         self.tasks_resolved = self._check_tasks_resolved()
         self.turn += 1
@@ -240,6 +389,31 @@ class DriftEnv(OpenEnv):
         combined_signals = list(self.active_inconsistency_signals)
         combined_signals.extend(action_result.get("inconsistency_signals", []))
         observation = self._build_observation(combined_signals)
+        if self.turn - 1 <= REWARD_DEBUG_LOG_STEPS:
+            at = parsed_action.get("action_type", "?")
+            print(
+                "[reward_debug] turn=%s action_type=%r r1=%.4f r2=%.4f (scaled=%.4f) r3=%.4f r4=%.4f r5=%.4f rep=%.4f "
+                "fmt=%.4f invn=%.4f explore=%.4f total=%.4f"
+                % (
+                    self.turn - 1,
+                    at,
+                    r1,
+                    r2,
+                    r2_scaled,
+                    r3,
+                    r4,
+                    r5,
+                    repetition_penalty,
+                    format_bonus,
+                    invalid_node_penalty,
+                    exploration_bonus,
+                    reward,
+                )
+            )
+            print(
+                f"[r4_debug] r4={r4:.4f} proposed_n={len(self.proposed_edits)} "
+                f"truth_n={len(self.pending_ground_truth_delta)}"
+            )
 
         return {
             "observation": observation,
@@ -252,6 +426,11 @@ class DriftEnv(OpenEnv):
                     "r3": r3,
                     "r4": r4,
                     "r5": r5,
+                    "r2_scaled": r2_scaled,
+                    "repetition_penalty": repetition_penalty,
+                    "format_bonus": format_bonus,
+                    "invalid_node_penalty": invalid_node_penalty,
+                    "exploration_bonus": exploration_bonus,
                 },
                 "parsed_action": parsed_action,
                 "validation_result": validation_result,
@@ -489,6 +668,7 @@ class DriftEnv(OpenEnv):
         subgraph_text = self.graph_engine.serialize_subgraph(subgraph)
         signals = list(dict.fromkeys(self.active_inconsistency_signals + extra_signals))
 
+        valid_ids = sorted((str(n) for n in self.graph_engine.graph.nodes()), key=str)
         return build_observation(
             subgraph_text=subgraph_text,
             task_description=self._build_task_description(),
@@ -497,6 +677,7 @@ class DriftEnv(OpenEnv):
             active_policy_excerpt=self._build_policy_excerpt(),
             turn_number=min(self.turn, self.MAX_TURNS),
             action_schema_text=build_action_schema_text(),
+            valid_node_ids=valid_ids,
         )
 
     def _build_task_description(self) -> str:

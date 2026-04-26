@@ -31,6 +31,7 @@ def build_observation(
     active_policy_excerpt: str,
     turn_number: int,
     action_schema_text: str | None = None,
+    valid_node_ids: list[str] | None = None,
 ) -> str:
     """Build the formatted DriftEnv LLM observation prompt.
 
@@ -56,10 +57,15 @@ def build_observation(
 
     max_tokens = 1200
     schema_text = action_schema_text or build_action_schema_text()
+    node_line = _format_valid_node_id_line(valid_node_ids)
     section_order = [
         ("TURN", str(turn_number)),
         ("TASK_DESCRIPTION", _normalize_text(task_description)),
         ("ACTION_SCHEMA", schema_text),
+        (
+            "VALID_NODE_IDS",
+            f"{node_line}\nUse only these identifiers when a parameter must reference a graph node.",
+        ),
         ("ACTIVE_POLICY_EXCERPT", _normalize_text(active_policy_excerpt)),
         ("SUBGRAPH", _normalize_text(subgraph_text)),
         ("INCONSISTENCY_SIGNALS", _format_list_section(inconsistency_signals)),
@@ -78,6 +84,7 @@ def build_observation(
         ("INCONSISTENCY_SIGNALS", 180),
         ("ACTIVE_POLICY_EXCERPT", 260),
         ("SUBGRAPH", 420),
+        ("VALID_NODE_IDS", 200),
         ("TASK_DESCRIPTION", 180),
     ]
 
@@ -114,6 +121,12 @@ def _render_section(header: str, content: str) -> str:
 
     normalized_content = content.strip() or "None"
     return f"## {header}\n{normalized_content}"
+
+
+def _format_valid_node_id_line(valid_node_ids: list[str] | None) -> str:
+    if not valid_node_ids:
+        return "None — refer to the SUBGRAPH section for current nodes."
+    return "VALID NODE IDS: " + ", ".join(valid_node_ids)
 
 
 def _normalize_text(value: Any) -> str:

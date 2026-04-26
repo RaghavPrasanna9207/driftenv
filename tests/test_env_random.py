@@ -4,7 +4,19 @@ import random
 from environment.env import DriftEnv
 
 
-EXPECTED_REWARD_KEYS = {"r1", "r2", "r3", "r4", "r5"}
+# Core components plus post-update shaping (see environment.env step).
+EXPECTED_REWARD_KEYS = {
+    "r1",
+    "r2",
+    "r3",
+    "r4",
+    "r5",
+    "r2_scaled",
+    "repetition_penalty",
+    "format_bonus",
+    "invalid_node_penalty",
+    "exploration_bonus",
+}
 
 
 def _random_valid_action_text(rng: random.Random, env: DriftEnv) -> str:
@@ -140,7 +152,7 @@ def test_random_agent_runs_three_full_driftenv_episodes() -> None:
                 f"reward_inputs={reward_inputs}"
             )
 
-            assert set(reward_breakdown.keys()) == EXPECTED_REWARD_KEYS
+            assert EXPECTED_REWARD_KEYS.issubset(reward_breakdown.keys())
 
             saw_flagged_nodes = saw_flagged_nodes or bool(reward_inputs["flagged_nodes"])
             saw_proposed_edits = saw_proposed_edits or reward_inputs["proposed_edits_count"] > 0

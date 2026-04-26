@@ -1,0 +1,29 @@
+name: driftenv
+description: Drift detection and repair environment for executive-assistant style graph tasks.
+version: 0.1.0
+entrypoint:
+  type: http
+  base_url: http://127.0.0.1:8000
+  endpoints:
+    reset:
+      method: POST
+      path: /reset
+    step:
+      method: POST
+      path: /step
+    state:
+      method: GET
+      path: /state
+    tasks:
+      method: GET
+      path: /tasks
+runtime:
+  command: uvicorn server:app --host 0.0.0.0 --port 8000
+  python_version: "3.12"
+metadata:
+  repository: https://huggingface.co/spaces/openenv/driftenv
+  tags:
+    - openenv
+    - reinforcement-learning
+    - graph-reasoning
+    - drift-detection

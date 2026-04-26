@@ -136,36 +136,42 @@ def parse_action(raw_text: str) -> dict[str, Any]:
 
 
 def build_action_schema_text() -> str:
-    """Render the explicit action contract shown to the model.
-
-    The text intentionally enumerates the allowed action types and their
-    required parameters so the policy prompt can discourage hallucinated
-    actions such as ``ADD_NODE`` or ``REPAIR_GRAPH``.
-    """
+    """Render a strict, unambiguous action contract for the policy."""
 
     lines = [
-        "Allowed action_type values:",
-        ", ".join(SUPPORTED_ACTION_TYPES),
+        "The only top-level keys are: \"action_type\" (string) and \"params\" (object).",
+        "Do NOT use prose, section titles, or explanatory text as parameter keys. Use only the",
+        "exact field names listed below for each action_type's params object.",
         "",
-        "Required params by action_type:",
+        "flag_inconsistency: params must contain exactly one of the following, not both:",
+        '  * \"node_id\": <string> — single node identifier that exists in the current graph, OR',
+        '  * \"node_ids\": <list of strings> — each string must be a node id that exists in the current graph.',
+        "",
+        "Required params for other action types (params must use exactly these key names):",
     ]
 
     for action_type in SUPPORTED_ACTION_TYPES:
+        if action_type == "flag_inconsistency":
+            continue
         definition = ACTION_DEFINITIONS[action_type]
         if "required_params" in definition:
-            requirement_text = ", ".join(definition["required_params"])
+            names = ", ".join(definition["required_params"])
+            lines.append(f"- {action_type}: {names}")
         else:
             required_any_of = definition.get("required_any_of", ())
-            requirement_text = "one of " + " or ".join(
-                "/".join(option) for option in required_any_of
-            )
-        lines.append(f"- {action_type}: {requirement_text}")
+            for option in required_any_of:
+                alts = ", ".join(option)
+                lines.append(
+                    f"- {action_type}: provide one of these key sets: {alts} (separate key names, not a combined label)."
+                )
 
     lines.extend(
         [
             "",
-            "Return exactly one JSON object with keys 'action_type' and 'params'.",
-            "Do not invent other action_type values such as ADD_NODE, ADD_EDGE, REPAIR_GRAPH, or LOG_INCONSISTENCY.",
+            "Return exactly one JSON object with 'action_type' and 'params'.",
+            "Disallowed action_type string values: ADD_NODE, ADD_EDGE, REPAIR_GRAPH, LOG_INCONSISTENCY.",
+            "Full list of allowed action_type values:",
+            ", ".join(SUPPORTED_ACTION_TYPES),
         ]
     )
     return "\n".join(lines)

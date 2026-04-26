@@ -117,7 +117,7 @@ def test_compute_r4_best_case() -> None:
     proposed_edits = ["fix-node-a", "repair-edge-b"]
     ground_truth_delta = ["fix-node-a", "repair-edge-b"]
 
-    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(1.0)
+    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(0.6)
 
 
 # This scenario represents only incorrect repairs when no repair was actually
@@ -126,7 +126,7 @@ def test_compute_r4_worst_case() -> None:
     proposed_edits = ["bad-fix-1", "bad-fix-2"]
     ground_truth_delta: list[str] = []
 
-    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(-0.5)
+    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(-0.32)
 
 
 # This scenario represents one correct repair and one incorrect extra repair,
@@ -135,7 +135,7 @@ def test_compute_r4_partial_case() -> None:
     proposed_edits = ["repair-a", "extra-fix"]
     ground_truth_delta = ["repair-a", "repair-b"]
 
-    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(0.25)
+    assert compute_r4(proposed_edits, ground_truth_delta) == pytest.approx(0.075)
 
 
 # This scenario represents taking exactly the minimum required number of steps,

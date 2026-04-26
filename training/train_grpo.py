@@ -3,12 +3,15 @@
 This script:
 1. Loads `unsloth/Meta-Llama-3.1-8B-Instruct` with 4-bit quantization.
 2. Applies LoRA adapters on the requested attention projections.
-3. Builds a small prompt dataset from local DriftEnv reset observations.
-4. Scores sampled completions by calling the FastAPI `/reset` and `/step`
-   endpoints exposed by `server.py`.
-5. Trains with `GRPOTrainer`.
-6. Merges LoRA weights back into the base model with `merge_and_unload()`.
-7. Saves the merged model locally and uploads it to the Hugging Face Hub.
+3. Builds a prompt dataset from ``NUM_EPISODES`` (Phase 8: 50) local DriftEnv
+   runs with episode_type=manager_departure and curriculum_stage=1.
+4. Scores each sampled action with a full reset -> step until done rollout
+   (same action at each step) using the FastAPI `/reset` and `/step` server,
+   summing per-step reward as the return for GRPO.
+5. Trains with `GRPOTrainer` and records per-episode means in `episode_rewards`
+   (console: ``Episode X Reward: Y``).
+6. Merges LoRA weights with `merge_and_unload()`.
+7. Saves the merged model locally and uploads to the Hugging Face Hub.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
+import numpy as np
 from datasets import Dataset
 from huggingface_hub import HfApi
 from transformers import set_seed
@@ -29,6 +34,13 @@ from unsloth import FastLanguageModel, is_bfloat16_supported
 
 from environment.env import DriftEnv
 
+
+# ---------------------------------------------------------------------------
+# Phase 8: fixed run configuration (not implicit dataset-length defaults)
+# ---------------------------------------------------------------------------
+NUM_EPISODES = 50
+EPISODE_TYPE = "manager_departure"  # EP-01; no policy_injection
+CURRICULUM_STAGE = 1
 
 MODEL_NAME = "unsloth/Meta-Llama-3.1-8B-Instruct"
 DEFAULT_ENV_BASE_URL = os.environ.get("DRIFTENV_BASE_URL", "http://127.0.0.1:8000")
@@ -65,18 +77,6 @@ def parse_args() -> argparse.Namespace:
         "--hf-token",
         default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN"),
         help="Hugging Face token used to create/upload the target repo.",
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=64,
-        help="Number of reset observations to synthesize into training prompts.",
-    )
-    parser.add_argument(
-        "--curriculum-stage",
-        type=int,
-        default=1,
-        help="Curriculum stage passed into DriftEnv reset metadata.",
     )
     return parser.parse_args()
 
@@ -124,20 +124,18 @@ def _extract_text(value: Any) -> str:
 
 def build_train_dataset(
     tokenizer: Any,
-    num_samples: int,
-    curriculum_stage: int,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> Dataset:
-    """Build GRPO prompts from deterministic DriftEnv reset observations."""
+    """Build GRPO prompts: one record per of ``NUM_EPISODES`` (reset -> rollout -> done) runs."""
 
-    episode_types = ("manager_departure", "policy_injection")
     records: list[dict[str, Any]] = []
 
-    for seed in range(num_samples):
-        episode_type = episode_types[seed % len(episode_types)]
+    for _episode_num in range(NUM_EPISODES):
+        # One env episode index (1..NUM_EPISODES) with distinct seeds (0..NUM_EPISODES-1).
+        seed = _episode_num
         env = DriftEnv(
-            episode_type=episode_type,
-            curriculum_stage=curriculum_stage,
+            episode_type=EPISODE_TYPE,
+            curriculum_stage=CURRICULUM_STAGE,
             seed=seed,
         )
         observation = env.reset()
@@ -153,67 +151,143 @@ def build_train_dataset(
         records.append(
             {
                 "prompt": prompt,
-                "episode_type": episode_type,
-                "curriculum_stage": curriculum_stage,
+                "episode_type": EPISODE_TYPE,
+                "curriculum_stage": CURRICULUM_STAGE,
                 "seed": seed,
+                "episode_id": _episode_num + 1,
             }
         )
 
     return Dataset.from_list(records)
 
 
-def reward_fn(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float]:
-    """Score each sampled completion using the environment's /step endpoint."""
+def _rollout_total_return(
+    base_url: str,
+    seed: int,
+    action_text: str,
+) -> float:
+    """One full env episode: /reset then /step with the same action until done; return sum of step rewards."""
 
-    del prompts  # The reset metadata below identifies which episode to replay.
-
-    batch_size = len(completions)
-    episode_types = _coerce_batch_column(
-        kwargs.get("episode_type"),
-        batch_size,
-        "manager_departure",
+    _post_json(
+        base_url,
+        "/reset",
+        {
+            "episode_type": EPISODE_TYPE,
+            "curriculum_stage": CURRICULUM_STAGE,
+            "seed": int(seed),
+        },
     )
-    curriculum_stages = _coerce_batch_column(
-        kwargs.get("curriculum_stage"),
-        batch_size,
-        1,
-    )
-    seeds = _coerce_batch_column(kwargs.get("seed"), batch_size, 0)
+    total = 0.0
+    # DriftEnv.MAX_TURNS is 12; keep a hard cap for safety.
+    for _ in range(32):
+        step_result = _post_json(
+            base_url,
+            "/step",
+            {"action": action_text},
+        )
+        total += float(step_result.get("reward", 0.0))
+        if bool(step_result.get("done")):
+            break
+    return total
 
-    rewards: list[float] = []
-    for completion, episode_type, curriculum_stage, seed in zip(
-        completions,
-        episode_types,
-        curriculum_stages,
-        seeds,
-    ):
-        completion_text = _extract_text(completion).strip()
 
-        try:
-            # Reset before every sampled action so each generation is evaluated
-            # from the same deterministic starting observation.
-            _post_json(
-                REWARD_ENV_BASE_URL,
-                "/reset",
-                {
-                    "episode_type": str(episode_type),
-                    "curriculum_stage": int(curriculum_stage),
-                    "seed": int(seed),
-                },
-            )
+def make_env_reward_fn(
+    episode_rewards: list[float],
+    episode_logged: list[bool],
+) -> Any:
+    """Build a reward function that records per-episode mean returns (one row = one of ``NUM_EPISODES`` trials)."""
 
-            # The server's /step endpoint wraps DriftEnv.step(action_text).
-            step_result = _post_json(
-                REWARD_ENV_BASE_URL,
-                "/step",
-                {"action": completion_text},
-            )
-            rewards.append(float(step_result.get("reward", 0.0)))
-        except Exception as exc:  # noqa: BLE001 - reward functions should stay robust.
-            print(f"[reward_fn] failed to score completion: {exc}")
-            rewards.append(0.0)
+    def env_reward_fn(prompts: list[Any], completions: list[Any], **kwargs: Any) -> list[float]:
+        del prompts
 
-    return rewards
+        batch_size = len(completions)
+        seeds = _coerce_batch_column(kwargs.get("seed"), batch_size, 0)
+        episode_ids = _coerce_batch_column(kwargs.get("episode_id"), batch_size, 0)
+
+        rewards: list[float] = []
+        for completion, seed, episode_id in zip(completions, seeds, episode_ids):
+            completion_text = _extract_text(completion).strip()
+
+            try:
+                total_return = _rollout_total_return(
+                    REWARD_ENV_BASE_URL,
+                    int(seed),
+                    completion_text,
+                )
+                rewards.append(total_return)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[env_reward_fn] failed to score completion: {exc}")
+                rewards.append(0.0)
+
+        # One logging line per GRPO prompt group (``num_generations`` samples share one episode_id / seed).
+        ep_id = int(episode_ids[0]) if episode_ids else 0
+        if 1 <= ep_id <= NUM_EPISODES:
+            mean_r = sum(rewards) / max(len(rewards), 1)
+            episode_rewards[ep_id - 1] = mean_r
+            if not episode_logged[ep_id - 1]:
+                episode_logged[ep_id - 1] = True
+                print(f"Episode {ep_id} Reward: {round(mean_r, 6)}")
+
+        return rewards
+
+    return env_reward_fn
+
+
+def plot_reward_curve(episode_rewards: list, save_path: str) -> float | None:
+    """Plot episode number vs total reward and return tail-trend slope when available."""
+
+    n = len(episode_rewards)
+    if n == 0:
+        print("plot_reward_curve: empty episode_rewards; nothing to plot.")
+        return None
+
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    episodes = np.arange(1, n + 1, dtype=float)
+    rewards = np.asarray(episode_rewards, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(episodes, rewards, marker="o", markersize=3)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Total reward")
+    ax.set_title("Episode reward curve")
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+
+    k = min(20, n)
+    y_tail = rewards[-k:]
+    x_tail = episodes[-k:]
+    if k < 2:
+        print("plot_reward_curve: need at least 2 points for polyfit; cannot report slope.")
+        return None
+    slope, _intercept = np.polyfit(x_tail, y_tail, 1)
+    print(f"Slope of last {k} episodes (linear fit, numpy.polyfit): {slope}")
+    return float(slope)
+
+
+def write_training_summary(
+    output_dir: Path,
+    episode_rewards: list[float],
+    reward_curve_path: Path,
+    tail_slope: float | None,
+) -> Path:
+    """Persist a compact JSON summary with learning-signal artifacts."""
+
+    artifacts_dir = output_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "num_episodes": len(episode_rewards),
+        "mean_reward": float(np.mean(episode_rewards)) if episode_rewards else 0.0,
+        "max_reward": float(np.max(episode_rewards)) if episode_rewards else 0.0,
+        "min_reward": float(np.min(episode_rewards)) if episode_rewards else 0.0,
+        "tail_slope_last_20": tail_slope,
+        "reward_curve_path": str(reward_curve_path),
+        "episode_rewards": [float(value) for value in episode_rewards],
+    }
+    summary_path = artifacts_dir / "training_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Wrote training summary to: {summary_path}")
+    return summary_path
 
 
 def save_and_push_merged_model(
@@ -291,22 +365,23 @@ def main() -> None:
         loftq_config=None,  # Disable LoftQ because the requested setup is standard 4-bit QLoRA.
     )
 
-    train_dataset = build_train_dataset(
-        tokenizer=tokenizer,
-        num_samples=args.num_samples,
-        curriculum_stage=args.curriculum_stage,
-    )
+    # Phase 8: one slot per `episode_id` (1..NUM_EPISODES) for plotting; filled during `make_env_reward_fn`.
+    episode_rewards: list[float] = []
+    episode_rewards.extend(0.0 for _ in range(NUM_EPISODES))
+    episode_reward_logged: list[bool] = [False] * NUM_EPISODES
+    train_dataset = build_train_dataset(tokenizer=tokenizer)
 
     training_args = GRPOConfig(
         output_dir=str(output_dir),  # Trainer metadata and logs still need a working directory.
         learning_rate=5e-6,  # Requested conservative LR for stable online RL updates.
         per_device_train_batch_size=1,  # Requested micro-batch size to fit generation-heavy GRPO on one GPU.
         gradient_accumulation_steps=8,  # Requested accumulation to recover an effective batch of 8 prompts.
-        num_train_epochs=1,  # Requested single-epoch pass over the synthetic reset dataset.
+        num_train_epochs=1,  # One pass over exactly ``NUM_EPISODES`` training rows (50 Phase 8 episodes).
         num_generations=8,  # Requested 8 sampled completions per prompt for GRPO group comparison.
         max_prompt_length=2048,  # Requested prompt truncation budget.
         max_completion_length=512,  # Requested action-generation budget.
-        remove_unused_columns=False,  # Keep episode metadata columns so reward_fn can replay the right env state.
+        remove_unused_columns=False,  # Keep episode metadata columns so the env reward can read seed / episode_id.
+        shuffle_dataset=False,  # Deterministic order: episode_id 1..NUM_EPISODES.
         bf16=is_bfloat16_supported(),  # Prefer BF16 on newer GPUs for speed/stability when supported.
         fp16=not is_bfloat16_supported(),  # Fall back to FP16 on older GPUs like T4/V100.
         optim="adamw_8bit",  # Use an 8-bit optimizer to reduce optimizer-state memory overhead.
@@ -318,11 +393,20 @@ def main() -> None:
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=reward_fn,
+        reward_funcs=make_env_reward_fn(episode_rewards, episode_reward_logged),
         args=training_args,
         train_dataset=train_dataset,
     )
     trainer.train()
+
+    reward_curve_path = output_dir / "episode_reward_curve.png"
+    tail_slope = plot_reward_curve(episode_rewards, str(reward_curve_path))
+    write_training_summary(
+        output_dir=output_dir,
+        episode_rewards=episode_rewards,
+        reward_curve_path=reward_curve_path,
+        tail_slope=tail_slope,
+    )
 
     save_and_push_merged_model(
         model=model,

@@ -98,6 +98,46 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class TaskItem(BaseModel):
+    """One task shown to API clients for the active scenario."""
+
+    task_id: str
+    action_type: str
+    prompt: str
+    route_to: str | None = None
+    assignee_name: str | None = None
+    recipient_name: str | None = None
+    recipient_region: str | None = None
+    data_region: str | None = None
+
+
+class TasksResponse(BaseModel):
+    """Response body for listing scenario tasks."""
+
+    episode_type: str
+    tasks: list[TaskItem]
+
+
+class StateResponse(BaseModel):
+    """Snapshot of the currently active episode state."""
+
+    episode_type: str
+    curriculum_stage: int
+    seed: int
+    turn: int
+    done: bool
+    tasks_resolved: bool
+    mutation_schedule: list[dict[str, Any]]
+    mutation_history: list[dict[str, Any]]
+    active_inconsistency_signals: list[str]
+    flagged_nodes: list[Any]
+    mutated_nodes: list[Any]
+    pending_ground_truth_delta_count: int
+    live_graph_node_count: int
+    live_graph_edge_count: int
+    valid_node_ids: list[str]
+
+
 @app.exception_handler(RequestValidationError)
 async def request_validation_exception_handler(
     request: Any, exc: RequestValidationError
@@ -166,3 +206,28 @@ def step_episode(request: StepRequest) -> StepResponse:
 
     step_result = current_episode.step(request.action)
     return StepResponse(**step_result)
+
+
+def _require_current_episode() -> DriftEnv:
+    """Return the active episode or raise a 400 when none exists."""
+
+    if current_episode is None:
+        raise HTTPException(status_code=400, detail="No active episode. Call /reset first.")
+    return current_episode
+
+
+@app.get("/tasks", response_model=TasksResponse)
+def tasks() -> TasksResponse:
+    """Return high-level scenario tasks for the active episode type."""
+
+    episode = _require_current_episode()
+    task_rows = [TaskItem(**task) for task in episode.get_tasks()]
+    return TasksResponse(episode_type=episode.episode_type, tasks=task_rows)
+
+
+@app.get("/state", response_model=StateResponse)
+def state() -> StateResponse:
+    """Return a compact state snapshot for debugging and eval tooling."""
+
+    episode = _require_current_episode()
+    return StateResponse(**episode.get_state_snapshot())
