@@ -92,15 +92,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-here = Path.cwd()
-dest = here / REPO_DIR
+# Use a single stable path on Colab. If you use `Path.cwd() / "driftenv"` and your cwd
+# is already .../driftenv, you get a broken nested path like /content/driftenv/driftenv.
+def _default_repo_parent() -> Path:
+    colab = Path("/content")
+    return colab if colab.is_dir() else Path.cwd()
+
+
+dest = (_default_repo_parent() / REPO_DIR).resolve()
 if dest.is_dir() and (dest / ".git").is_dir():
     subprocess.run(["git", "-C", str(dest), "pull", "--ff-only"], check=False)
 else:
     subprocess.run(["git", "clone", GITHUB_REPO, str(dest)], check=True)
 
 os.chdir(dest)
-print("CWD =", os.getcwd())
+REPO_ROOT = dest
+print("REPO_ROOT =", REPO_ROOT)
+print("OK train_grpo.py:", (REPO_ROOT / "training" / "train_grpo.py").is_file())
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
 subprocess.check_call(
@@ -138,7 +146,7 @@ else:
 """
         ),
         code(
-            r"""# Check /health and /state
+            r"""# Check /health and /state (no /reset yet -> GET /state is expected to 400)
 import urllib.error
 import urllib.request
 
@@ -148,13 +156,13 @@ def http_get(url: str) -> str:
         with urllib.request.urlopen(url, timeout=15) as r:
             return r.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
-        return f"HTTP {e.code}"
+        return f"HTTP {e.code} ({e.reason!s})"
     except Exception as e:  # noqa: BLE001
         return f"err: {e}"
 
 
 print("health =", http_get(ENV_BASE_URL + "/health"))
-print("state  =", http_get(ENV_BASE_URL + "/state")[:1200])
+print("state  =", http_get(ENV_BASE_URL + "/state")[:200], "... (400 until you POST /reset once)")
 """
         ),
         code(
@@ -162,26 +170,52 @@ print("state  =", http_get(ENV_BASE_URL + "/state")[:1200])
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 if "YOUR_MODEL_REPO_NAME" in HF_HUB_MODEL_ID:
     raise ValueError("Set HF_HUB_MODEL_ID to your real user/model (create a Model repo on HF first).")
 if not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")):
     raise RuntimeError("Set HF_TOKEN (Colab Secret or os.environ) before training.")
 
-subprocess.check_call(
-    [
-        sys.executable,
-        "training/train_grpo.py",
-        "--env-base-url",
-        os.environ["DRIFTENV_BASE_URL"],
-        "--output-dir",
-        OUTPUT_DIR,
-        "--hub-model-id",
-        HF_HUB_MODEL_ID,
-        "--hf-token",
-        os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_HUB_TOKEN", ""),
-    ]
-)
+
+def _resolve_repo_root() -> Path:
+    gr = globals().get("REPO_ROOT")
+    if gr is not None and (gr / "training" / "train_grpo.py").is_file():
+        return gr
+    for candidate in (Path("/content") / "driftenv", Path("/content") / "driftenv" / "driftenv", Path.cwd()):
+        if (candidate / "training" / "train_grpo.py").is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        "Cannot find training/train_grpo.py. Re-run the clone cell above with a clean path."
+    )
+
+
+repo = _resolve_repo_root()
+os.chdir(repo)
+print("Training cwd =", repo)
+
+cmd = [
+    sys.executable,
+    "training/train_grpo.py",
+    "--env-base-url",
+    os.environ["DRIFTENV_BASE_URL"],
+    "--output-dir",
+    OUTPUT_DIR,
+    "--hub-model-id",
+    HF_HUB_MODEL_ID,
+    "--hf-token",
+    os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_HUB_TOKEN", ""),
+]
+p = subprocess.run(cmd, cwd=str(repo), text=True, capture_output=True, env={**os.environ})
+if p.stdout:
+    print(p.stdout, end="")
+if p.returncode != 0:
+    print("--- train_grpo.py stderr (full traceback) ---", flush=True)
+    if p.stderr:
+        print(p.stderr, end="")
+    raise RuntimeError(
+        f"train_grpo.py exited with {p.returncode}. Read stderr above (OOM, import, or Hub errors are common)."
+    )
 """
         ),
         md(
@@ -202,11 +236,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-merged = Path(OUTPUT_DIR) / "merged"
+
+def _eval_repo() -> Path:
+    gr = globals().get("REPO_ROOT")
+    if gr is not None and (gr / "training" / "eval.py").is_file():
+        return gr
+    for c in (Path("/content") / "driftenv", Path("/content") / "driftenv" / "driftenv", Path.cwd()):
+        if (c / "training" / "eval.py").is_file():
+            return c.resolve()
+    return Path.cwd()
+
+
+repo = _eval_repo()
+merged = repo / OUTPUT_DIR / "merged"
 if not merged.is_dir() or not any(merged.iterdir()):
     print("Skip eval: no merged checkpoint at", merged, "- finish training first.")
 else:
-    os.makedirs(EVAL_DIR, exist_ok=True)
+    os.makedirs(repo / EVAL_DIR, exist_ok=True)
     subprocess.check_call(
         [
             sys.executable,
@@ -223,9 +269,10 @@ else:
             BASELINE_HF_MODEL,
             "--trained-model",
             str(merged.resolve()),
-        ]
+        ],
+        cwd=str(repo),
     )
-    print("Wrote metrics to", Path(EVAL_DIR) / "metrics_summary.json")
+    print("Wrote metrics to", repo / EVAL_DIR / "metrics_summary.json")
 """
         ),
         code(
@@ -235,7 +282,17 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-summary_path = Path(EVAL_DIR) / "metrics_summary.json"
+_rp = globals().get("REPO_ROOT")
+if _rp is not None and (_rp / EVAL_DIR / "metrics_summary.json").is_file():
+    summary_path = _rp / EVAL_DIR / "metrics_summary.json"
+else:
+    for _c in (Path("/content") / "driftenv", Path("/content") / "driftenv" / "driftenv", Path.cwd()):
+        _p = _c / EVAL_DIR / "metrics_summary.json"
+        if _p.is_file():
+            summary_path = _p
+            break
+    else:
+        summary_path = Path(EVAL_DIR) / "metrics_summary.json"
 if not summary_path.is_file():
     print("No", summary_path, "- run the eval cell after training creates merged/")
 else:
@@ -354,7 +411,8 @@ else:
             r"""# Outputs (curves, JSON summary, merged model folder)
 from pathlib import Path
 
-od = Path(OUTPUT_DIR)
+_root = globals().get("REPO_ROOT")
+od = _root / OUTPUT_DIR if _root is not None else Path(OUTPUT_DIR)
 if od.is_dir():
     for p in sorted(od.rglob("*.json")) + sorted(od.rglob("*.png")):
         if p.is_file() and p.stat().st_size < 2_000_000:
