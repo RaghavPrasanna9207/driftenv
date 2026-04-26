@@ -96,7 +96,9 @@ os.chdir(dest)
 print("CWD =", os.getcwd())
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"])
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-train.txt"]
+)
 """
         ),
         code(

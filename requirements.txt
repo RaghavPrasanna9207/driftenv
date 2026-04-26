@@ -1,23 +1,5 @@
-# Environment & Graph Simulation
+# Runtime for server.py / DriftEnv API (HF Space + local UV stack)
 networkx>=3.0.0
-openenv
-
-# Web Server (API)
 fastapi>=0.100.0
 uvicorn>=0.23.0
 pydantic>=2.0.0
-
-# Testing
-pytest>=7.4.0
-
-# Machine Learning & LLM (Colab T4 GPU setup)
-numpy>=1.24.0
-matplotlib>=3.7.0
-torch>=2.1.0
-transformers>=4.40.0
-huggingface_hub>=0.22.0
-trl>=0.8.0
-
-# Unsloth (optimized for Colab T4)
-# Follow unsloth docs for exact GPU specific wheels in Colab if needed:
-unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git

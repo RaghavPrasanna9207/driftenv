@@ -38,6 +38,8 @@ LLMs often fail when world state changes silently mid-workflow. DriftEnv trains 
 - `training/inference.py` - side-by-side rollout comparison helpers
 - `inference.py` - root inference entrypoint
 - `openenv.yaml` - OpenEnv metadata manifest
+- `requirements.txt` - minimal deps for the **API** (HF Space Docker build)
+- `requirements-train.txt` - full stack for **Colab** / `train_grpo.py` (Torch, TRL, Unsloth, `openenv`)
 - `tests/` - unit/integration tests
 
 ## API Contract
@@ -75,10 +77,18 @@ Basic API liveness.
 
 ## Local Setup
 
+**API / environment only** (matches the Hugging Face Space image):
+
 ```bash
 python -m venv .venv
 . .venv/Scripts/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+**Training, tests, and inference** (includes Unsloth; needs `git` for that install):
+
+```bash
+pip install -r requirements-train.txt
 ```
 
 ## Run the Environment Server
@@ -144,6 +154,8 @@ python inference.py \
 ```
 
 ## Testing
+
+Install test dependencies with `pip install -r requirements-train.txt` (test suite includes optional torch paths).
 
 ```bash
 python -m pytest tests/ -q
