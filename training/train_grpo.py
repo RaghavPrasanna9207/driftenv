@@ -44,7 +44,7 @@ CURRICULUM_STAGE = 1
 
 MODEL_NAME = "unsloth/Meta-Llama-3.1-8B-Instruct"
 DEFAULT_ENV_BASE_URL = os.environ.get("DRIFTENV_BASE_URL", "http://127.0.0.1:8000")
-DEFAULT_OUTPUT_DIR = Path("outputs") / "driftenv-grpo"
+DEFAULT_OUTPUT_DIR = Path("outputs") / "driftenv-train"
 REWARD_ENV_BASE_URL = DEFAULT_ENV_BASE_URL
 DEFAULT_SYSTEM_PROMPT = (
     "You are controlling DriftEnv as an executive assistant agent. "
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hub-model-id",
         default=os.environ.get("HF_HUB_MODEL_ID"),
-        help="Destination Hugging Face model repo, e.g. username/driftenv-grpo.",
+        help="Destination Hugging Face *model* repo for merged weights (create an empty model repo on HF), e.g. username/my-driftenv-model.",
     )
     parser.add_argument(
         "--hf-token",

@@ -91,18 +91,20 @@ For Hugging Face Spaces (Docker), the app runs on port `7860`.
 
 ## Training (GRPO + Unsloth)
 
+Create an empty **Hugging Face Model** repository (for trained weights) at [huggingface.co/new-model](https://huggingface.co/new-model). This is separate from your **Space** (`driftenv-env`). Use any repo name you like, e.g. `yourname/driftenv-llama-finetune`.
+
 ```bash
 python training/train_grpo.py \
   --env-base-url http://127.0.0.1:8000 \
-  --output-dir outputs/driftenv-grpo \
-  --hub-model-id <your-username>/driftenv-grpo \
+  --output-dir outputs/driftenv-train \
+  --hub-model-id <your-username>/<your-new-model-repo> \
   --hf-token <hf_token>
 ```
 
 Training outputs include:
-- `outputs/driftenv-grpo/episode_reward_curve.png`
-- `outputs/driftenv-grpo/artifacts/training_summary.json`
-- merged model checkpoint under `outputs/driftenv-grpo/merged/`
+- `outputs/driftenv-train/episode_reward_curve.png`
+- `outputs/driftenv-train/artifacts/training_summary.json`
+- merged model checkpoint under `outputs/driftenv-train/merged/`
 
 ## Evaluation (Baseline vs Trained)
 

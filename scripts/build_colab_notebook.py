@@ -34,9 +34,15 @@ def main() -> None:
         md(
             r"""# DriftEnv — Google Colab
 
+**Repository:** [github.com/RaghavPrasanna9207/driftenv](https://github.com/RaghavPrasanna9207/driftenv)
+
+**Hugging Face Space (live environment API):** [huggingface.co/spaces/RaghavPrasanna9207/driftenv-env](https://huggingface.co/spaces/RaghavPrasanna9207/driftenv-env)
+
+**Trained model upload:** `train_grpo.py` expects a **separate** Hugging Face **Model** repository (for weights), not the Space. [Create a new model](https://huggingface.co/new-model), then set `HF_HUB_MODEL_ID` below to `yourname/that-repo`.
+
 This notebook supports **two** training paths:
 
-- **Path A (repo default, matches `training/train_grpo.py`)** — Start the DriftEnv **FastAPI** server, then run `training/train_grpo.py`. The reward function calls your running server with `/reset` and `/step` and scores **full-episode** returns (as shipped in the repo).
+- **Path A (repo default, matches `training/train_grpo.py`)** — Start the DriftEnv **FastAPI** server *or* use your **hosted Space** as `DRIFTENV_BASE_URL`, then run `training/train_grpo.py`. The reward function calls `/reset` and `/step` and scores **full-episode** returns (as shipped in the repo).
 - **Path B (legacy in-notebook / interactive)** — **No server**: `import` `DriftEnv` in the same process, build a custom TRL `reward_funcs` + `GRPOTrainer`, then optionally run a **multi-turn** evaluation rollout.
 
 **Episode type:** use `manager_departure` (this replaces the old `EP-01` string, which is not a valid `episode_type` in the current code).
@@ -45,26 +51,31 @@ This notebook supports **two** training paths:
 """
         ),
         code(
-            r"""# --- Configuration ---
+            r"""# --- Configuration (official project URLs) ---
+# Source code
 GITHUB_REPO = "https://github.com/RaghavPrasanna9207/driftenv.git"
 REPO_DIR = "driftenv"
 
-# Hub model id for `train_grpo.py` and optional Path B push
-HF_HUB_MODEL_ID = "RaghavPrasanna9207/driftenv-grpo"  # change to your org/name
+# Hugging Face: Space (UI + same FastAPI as local) and API base for HTTP training
+HF_SPACE_PAGE = "https://huggingface.co/spaces/RaghavPrasanna9207/driftenv-env"
+# Use this as DRIFTENV_BASE_URL when you train against the Space without running uvicorn in Colab:
+HF_SPACE_APP_URL = "https://raghavprasanna9207-driftenv-env.hf.space"
 
-# Path A: local API
+# Where TRL uploads the merged model (this is *not* your Space — create a *Model* repo on HF and paste its id)
+# e.g. https://huggingface.co/new-model -> then set "user/repo" here (repo can be any name you choose)
+HF_HUB_MODEL_ID = "RaghavPrasanna9207/YOUR_MODEL_REPO_NAME"
+
+# Path A: reward server — local Colab *or* hosted Space
+USE_LOCAL_ENV_SERVER = True  # False -> use HF_SPACE_APP_URL for train_grpo (skip local uvicorn)
 ENV_PORT = 8000
-ENV_BASE_URL = f"http://127.0.0.1:{ENV_PORT}"
-OUTPUT_DIR = "outputs/driftenv-grpo"
+ENV_BASE_URL = (
+    f"http://127.0.0.1:{ENV_PORT}" if USE_LOCAL_ENV_SERVER else HF_SPACE_APP_URL.rstrip("/")
+)
+OUTPUT_DIR = "outputs/driftenv-train"  # local run folder; name is arbitrary
 
 # Path B: in-process DriftEnv
 EPISODE_TYPE = "manager_departure"  # not "EP-01"
 CURRICULUM_STAGE = 1
-
-# Optional: public Space URL if you want to point a *client* at hosted env (not used by Path B)
-# Remapped from the old `OPENENV_BASE_URL` name to the variable `train_grpo` reads:
-# DRIFTENV_BASE_URL is set after clone (Path A) or to your public Space if you only run a remote server.
-# HF_SPACE_BASE_URL = "https://raghavprasanna9207-driftenv-env.hf.space"
 """
         ),
         code(
@@ -114,6 +125,7 @@ os.environ["DRIFTENV_BASE_URL"] = ENV_BASE_URL
 os.environ["HF_HUB_MODEL_ID"] = HF_HUB_MODEL_ID
 if os.environ.get("HF_TOKEN"):
     os.environ["HUGGINGFACE_HUB_TOKEN"] = os.environ["HF_TOKEN"]
+print("DRIFTENV_BASE_URL =", os.environ["DRIFTENV_BASE_URL"], "(local)" if USE_LOCAL_ENV_SERVER else "(HF Space app)")
 # Optional: improve cold-start / telemetry on slow networks (same as many Colab Unsloth setups)
 # os.environ["UNSLOTH_DISABLE_STATISTICS"] = "1"
 # os.environ["UNSLOTH_USE_MODELSCOPE"] = "1"
@@ -122,22 +134,26 @@ if os.environ.get("HF_TOKEN"):
         ),
         md("## Path A — `uvicorn` + `train_grpo.py` (full-episode HTTP reward, matches repo)"),
         code(
-            r"""# Start the API in the background (this runtime)
+            r"""# Start the API in the background (only if USE_LOCAL_ENV_SERVER is True)
 import os, subprocess, time, sys
 
-if "server" in dir() and server is not None:
-    try:
-        server.terminate()
-    except Exception:  # noqa: BLE001
-        pass
-
-server = subprocess.Popen(
-    [sys.executable, "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", str(ENV_PORT)],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.STDOUT,
-)
-time.sleep(3)
-print("server pid =", server.pid)
+server = None
+if not USE_LOCAL_ENV_SERVER:
+    print("Skipping local uvicorn; using hosted Space at:", HF_SPACE_APP_URL)
+    print("Space page:", HF_SPACE_PAGE)
+else:
+    if "server" in dir() and server is not None:
+        try:
+            server.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+    server = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", str(ENV_PORT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(3)
+    print("Local server pid =", server.pid)
 """
         ),
         code(
@@ -413,14 +429,16 @@ print("rollout end")
 """
         ),
         code(
-            r"""# Stop Path A server when you are done
+            r"""# Stop local Path A server when you are done (if started)
 if "server" in dir() and server is not None:
     server.terminate()
     try:
         server.wait(timeout=5)
     except Exception:  # noqa: BLE001
         pass
-    print("Server stopped")
+    print("Local server stopped")
+else:
+    print("No local server to stop (using hosted Space or Path B).")
 """
         ),
     ]
