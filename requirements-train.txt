@@ -19,6 +19,8 @@ transformers>=4.51.3,<=5.5.0
 trl>=0.18.2,<=0.24.0,!=0.19.0
 # trl TRL/GRPO imports mergekit (mergekit_utils) — not always pulled as a transitive dep
 mergekit>=0.0.6
+# trl 0.2x optional logging stack (fails on import if missing in some Colab images)
+weave
 
 # Unsloth (git required; available on Colab, not in slim Docker)
 unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git

@@ -19,10 +19,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+# `python training/train_grpo.py` (e.g. Colab subprocess) does not inherit a notebook's sys.path
+_repo_root = Path(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
 
 import matplotlib.pyplot as plt
 import numpy as np

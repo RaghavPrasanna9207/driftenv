@@ -199,6 +199,9 @@ repo = _resolve_repo_root()
 os.chdir(repo)
 print("Training cwd =", repo)
 
+# Subprocess is a new interpreter: notebook sys.path is ignored. train_grpo.py also fixes sys.path; PYTHONPATH is backup.
+_env = {**os.environ, "PYTHONPATH": str(repo) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+
 cmd = [
     sys.executable,
     "training/train_grpo.py",
@@ -211,7 +214,7 @@ cmd = [
     "--hf-token",
     os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_HUB_TOKEN", ""),
 ]
-p = subprocess.run(cmd, cwd=str(repo), text=True, capture_output=True, env={**os.environ})
+p = subprocess.run(cmd, cwd=str(repo), text=True, capture_output=True, env=_env)
 if p.stdout:
     print(p.stdout, end="")
 if p.returncode != 0:
