@@ -21,7 +21,7 @@ runtime:
   command: uvicorn server:app --host 0.0.0.0 --port 8000
   python_version: "3.12"
 metadata:
-  repository: https://huggingface.co/spaces/openenv/driftenv
+  repository: https://huggingface.co/spaces/RaghavPrasanna9207/driftenv-env
   tags:
     - openenv
     - reinforcement-learning

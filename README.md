@@ -97,7 +97,7 @@ Create an empty **Hugging Face Model** repository (for trained weights) at [hugg
 python training/train_grpo.py \
   --env-base-url http://127.0.0.1:8000 \
   --output-dir outputs/driftenv-train \
-  --hub-model-id <your-username>/<your-new-model-repo> \
+  --hub-model-id RaghavPrasanna9207/driftenv-grpo \
   --hf-token <hf_token>
 ```
 
