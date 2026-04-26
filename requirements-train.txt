@@ -9,12 +9,14 @@ pytest>=7.4.0
 # Machine Learning & LLM (Colab GPU)
 numpy>=1.24.0
 matplotlib>=3.7.0
-# Recent trl+mergekit C++ ext ask for 2.11+ (avoids "Skipping import of cpp extensions" on Colab)
-torch>=2.11.0
+# unsloth_zoo (Colab) requires torch<2.11. Newer torch breaks resolution; mergekit may skip C++ ext (harmless).
+torch>=2.4.0,<2.11.0
 huggingface_hub>=0.22.0
-# trl GRPO pulls llm_blender, which still imports TRANSFORMERS_CACHE (removed in newer transformers)
-transformers>=4.40.0,<4.46.0
-trl>=0.8.0
+# Aligned with unsloth[colab-new] (>=4.51.3). Do not cap <4.46: that conflicts with unsloth.
+# train_grpo.py shims TRANSFORMERS_CACHE for llm_blender (trl) on new transformers.
+transformers>=4.51.3,<=5.5.0
+# unsloth_zoo expects trl in this band (see pip install unsloth).
+trl>=0.18.2,<=0.24.0,!=0.19.0
 # trl TRL/GRPO imports mergekit (mergekit_utils) — not always pulled as a transitive dep
 mergekit>=0.0.6
 

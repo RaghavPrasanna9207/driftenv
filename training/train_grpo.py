@@ -29,6 +29,21 @@ import numpy as np
 from datasets import Dataset
 from huggingface_hub import HfApi
 from transformers import set_seed
+
+# llm_blender (pulled in by trl) still imports TRANSFORMERS_CACHE, removed from transformers>=4.46
+import transformers.utils.hub as _transformers_hub
+
+if not hasattr(_transformers_hub, "TRANSFORMERS_CACHE"):
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        _transformers_hub.TRANSFORMERS_CACHE = str(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001
+        _transformers_hub.TRANSFORMERS_CACHE = os.path.join(
+            os.path.expanduser(os.environ.get("HF_HOME", "~/.cache/huggingface")),
+            "hub",
+        )
+
 from trl import GRPOConfig, GRPOTrainer
 from unsloth import FastLanguageModel, is_bfloat16_supported
 

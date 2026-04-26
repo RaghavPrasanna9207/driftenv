@@ -111,8 +111,9 @@ print("REPO_ROOT =", REPO_ROOT)
 print("OK train_grpo.py:", (REPO_ROOT / "training" / "train_grpo.py").is_file())
 
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
+# No -q: pip dependency errors (torch vs unsloth, etc.) are visible in the cell output
 subprocess.check_call(
-    [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements-train.txt"]
+    [sys.executable, "-m", "pip", "install", "-r", "requirements-train.txt"]
 )
 """
         ),
