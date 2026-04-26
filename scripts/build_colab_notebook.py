@@ -60,6 +60,13 @@ ENV_BASE_URL = (
     f"http://127.0.0.1:{ENV_PORT}" if USE_LOCAL_ENV_SERVER else HF_SPACE_APP_URL.rstrip("/")
 )
 OUTPUT_DIR = "outputs/driftenv-train"
+
+# Same base Instruct model as `training/train_grpo.py` (before your fine-tune)
+BASELINE_HF_MODEL = "unsloth/Meta-Llama-3.1-8B-Instruct"
+# Rollout count for `training/eval.py` (baseline vs merged checkpoint)
+EVAL_EPISODES = 20
+# Where `eval.py` writes JSON; plots read `metrics_summary.json` here
+EVAL_DIR = f"{OUTPUT_DIR}/eval_baseline_trained"
 """
         ),
         code(
@@ -175,6 +182,172 @@ subprocess.check_call(
         os.environ.get("HF_TOKEN", "") or os.environ.get("HUGGINGFACE_HUB_TOKEN", ""),
     ]
 )
+"""
+        ),
+        md(
+            r"""## Baseline vs trained evaluation
+
+After training, this runs `training/eval.py` on:
+
+- **Baseline:** the same 8B Instruct checkpoint used before GRPO (no DriftEnv fine-tune).
+- **Trained:** your **merged** weights under `OUTPUT_DIR/merged` (written by `train_grpo.py`).
+
+Models are loaded **one at a time** to reduce VRAM spikes on a single GPU. The next cell produces comparison plots (aggregate bars, per-episode curves, and deltas).
+"""
+        ),
+        code(
+            r"""# Run offline eval: base Instruct vs merged GRPO model (no API server needed for env — uses local `DriftEnv`)
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+merged = Path(OUTPUT_DIR) / "merged"
+if not merged.is_dir() or not any(merged.iterdir()):
+    print("Skip eval: no merged checkpoint at", merged, "- finish training first.")
+else:
+    os.makedirs(EVAL_DIR, exist_ok=True)
+    subprocess.check_call(
+        [
+            sys.executable,
+            "training/eval.py",
+            "--episode-type",
+            "manager_departure",
+            "--curriculum-stage",
+            "1",
+            "--episodes",
+            str(EVAL_EPISODES),
+            "--output-dir",
+            EVAL_DIR,
+            "--baseline-model",
+            BASELINE_HF_MODEL,
+            "--trained-model",
+            str(merged.resolve()),
+        ]
+    )
+    print("Wrote metrics to", Path(EVAL_DIR) / "metrics_summary.json")
+"""
+        ),
+        code(
+            r"""# Plots: baseline vs trained (DriftEnv rollouts)
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+
+summary_path = Path(EVAL_DIR) / "metrics_summary.json"
+if not summary_path.is_file():
+    print("No", summary_path, "- run the eval cell after training creates merged/")
+else:
+    data = json.loads(summary_path.read_text(encoding="utf-8"))
+    b, t, dlt = data["baseline"], data["trained"], data["delta"]
+    color_b, color_t = "#4e79a7", "#f28e2b"  # blue = baseline, orange = trained
+
+    # 1) Four aggregate metrics (same units per subplot)
+    fig1, axs = plt.subplots(2, 2, figsize=(11, 8))
+    fig1.suptitle("Aggregate metrics (higher reward & success better; lower invalid actions better)", fontsize=13)
+    specs = [
+        ("mean_total_reward", "Mean total reward", "reward"),
+        ("success_rate", "Success rate", "fraction"),
+        ("mean_invalid_actions", "Mean invalid actions", "count / ep"),
+        ("mean_turns", "Mean turns to done", "turns"),
+    ]
+    for ax, (key, title, yl) in zip(axs.flat, specs):
+        vals = [b[key], t[key]]
+        ax.bar(
+            [0, 1],
+            vals,
+            color=[color_b, color_t],
+            width=0.55,
+            edgecolor="white",
+        )
+        ax.set_xticks([0, 1], ["Baseline\n(base Instruct)", "Trained\n(merged GRPO)"])
+        ax.set_title(title)
+        ax.set_ylabel(yl)
+    fig1.tight_layout()
+    plt.show()
+
+    # 2) Per-episode total return
+    b_ep, t_ep = b["per_episode"], t["per_episode"]
+    seeds = [row["seed"] for row in b_ep]
+    fig2, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(seeds, [row["total_reward"] for row in b_ep], "o-", color=color_b, label="Baseline", alpha=0.9)
+    ax.plot(seeds, [row["total_reward"] for row in t_ep], "s-", color=color_t, label="Trained (GRPO)", alpha=0.9)
+    ax.set_xlabel("Episode index (fixed seeds)")
+    ax.set_ylabel("Total reward")
+    ax.set_title("Per-episode return: same env seeds for both policies")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    fig2.tight_layout()
+    plt.show()
+
+    # 3) Per-episode invalid actions and episode length
+    fig3, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(11, 4))
+    ax_l.plot(seeds, [row["invalid_actions"] for row in b_ep], "o-", color=color_b, label="Baseline")
+    ax_l.plot(seeds, [row["invalid_actions"] for row in t_ep], "s-", color=color_t, label="Trained")
+    ax_l.set_xlabel("Episode")
+    ax_l.set_ylabel("Invalid actions (count)")
+    ax_l.set_title("Invalid action counts")
+    ax_l.legend()
+    ax_l.grid(True, alpha=0.3)
+    ax_r.plot(seeds, [row["turns"] for row in b_ep], "o-", color=color_b, label="Baseline")
+    ax_r.plot(seeds, [row["turns"] for row in t_ep], "s-", color=color_t, label="Trained")
+    ax_r.set_xlabel("Episode")
+    ax_r.set_ylabel("Turns")
+    ax_r.set_title("Turns until episode end")
+    ax_r.legend()
+    ax_r.grid(True, alpha=0.3)
+    fig3.tight_layout()
+    plt.show()
+
+    # 4) Task success (1 = resolved) + delta summary
+    fig4, ax = plt.subplots(figsize=(10, 3.2))
+    jitter = 0.08
+    s_b = [float(row["tasks_resolved"]) for row in b_ep]
+    s_t = [float(row["tasks_resolved"]) for row in t_ep]
+    ax.scatter(
+        [s - jitter for s in seeds],
+        s_b,
+        c=color_b,
+        s=60,
+        alpha=0.85,
+        label="Baseline",
+    )
+    ax.scatter(
+        [s + jitter for s in seeds],
+        s_t,
+        c=color_t,
+        s=60,
+        alpha=0.85,
+        label="Trained",
+    )
+    ax.set_xlabel("Episode")
+    ax.set_yticks([0, 1], ["Not resolved", "Resolved"])
+    ax.set_title("Per-episode task resolution (1 = all tasks done)")
+    ax.legend()
+    ax.grid(True, axis="x", alpha=0.2)
+    fig4.tight_layout()
+    plt.show()
+
+    # 5) Trained - baseline (signed deltas). Green = moved in a helpful direction for that metric.
+    keys = list(dlt.keys())
+    yv = [dlt[k] for k in keys]
+    labels = [k.replace("_", " ") for k in keys]
+    bar_colors: list[str] = []
+    for k, v in zip(keys, yv):
+        if k in ("mean_total_reward", "success_rate"):
+            bar_colors.append("#59a14f" if v >= 0 else "#e15759")
+        elif k == "mean_invalid_actions":
+            bar_colors.append("#59a14f" if v <= 0 else "#e15759")
+        else:  # mean_turns: neutral (shorter is not always "success" in all scenarios)
+            bar_colors.append("#bab0ac")
+    fig5, ax5 = plt.subplots(figsize=(7.5, 3.5))
+    ax5.barh(labels, yv, color=bar_colors, edgecolor="white")
+    ax5.axvline(0, color="black", lw=0.6)
+    ax5.set_xlabel("Trained minus baseline")
+    ax5.set_title("Deltas: green = better reward/success or fewer invalid; gray = mean turns (contextual)")
+    fig5.tight_layout()
+    plt.show()
 """
         ),
         code(

@@ -71,8 +71,10 @@ def _heuristic_action(observation: str, rng: random.Random) -> str:
     )
 
 
-def _load_model_policy(model_name_or_path: str) -> Callable[[str, random.Random], str]:
-    """Load a HF model and return a policy callable."""
+def _load_model_policy(
+    model_name_or_path: str,
+) -> tuple[Callable[[str, random.Random], str], Callable[[], None]]:
+    """Load a HF model and return (policy, teardown) so VRAM is freed before loading another model."""
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -83,7 +85,12 @@ def _load_model_policy(model_name_or_path: str) -> Callable[[str, random.Random]
         del rng
         return _generate_action_text(model=model, tokenizer=tokenizer, observation=observation)
 
-    return policy
+    def teardown() -> None:
+        nonlocal model, tokenizer
+        del model
+        del tokenizer
+
+    return policy, teardown
 
 
 def _run_policy(
@@ -140,6 +147,21 @@ def _run_policy(
     }
 
 
+def _release_cuda_memory() -> None:
+    """Best-effort GPU memory cleanup between loading two big checkpoints."""
+
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
     """Run baseline/trained evaluation and write artifacts."""
 
@@ -147,16 +169,13 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_policy = (
-        _load_model_policy(args.baseline_model)
-        if args.baseline_model.strip()
-        else _random_action
-    )
-    trained_policy = (
-        _load_model_policy(args.trained_model)
-        if args.trained_model.strip()
-        else _heuristic_action
-    )
+    # Run one HF policy at a time so two 8B models are never resident together (T4 / 16GB).
+    baseline_policy: Callable[[str, random.Random], str]
+    baseline_cleanup: Callable[[], None] | None = None
+    if args.baseline_model.strip():
+        baseline_policy, baseline_cleanup = _load_model_policy(args.baseline_model)
+    else:
+        baseline_policy = _random_action
 
     baseline_metrics = _run_policy(
         policy=baseline_policy,
@@ -164,12 +183,26 @@ def main() -> None:
         curriculum_stage=args.curriculum_stage,
         episodes=args.episodes,
     )
+    if baseline_cleanup is not None:
+        baseline_cleanup()
+        _release_cuda_memory()
+
+    trained_policy: Callable[[str, random.Random], str]
+    trained_cleanup: Callable[[], None] | None = None
+    if args.trained_model.strip():
+        trained_policy, trained_cleanup = _load_model_policy(args.trained_model)
+    else:
+        trained_policy = _heuristic_action
+
     trained_metrics = _run_policy(
         policy=trained_policy,
         episode_type=args.episode_type,
         curriculum_stage=args.curriculum_stage,
         episodes=args.episodes,
     )
+    if trained_cleanup is not None:
+        trained_cleanup()
+        _release_cuda_memory()
 
     summary = {
         "episode_type": args.episode_type,
