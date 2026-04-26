@@ -51,8 +51,8 @@ REPO_DIR = "driftenv"
 HF_SPACE_PAGE = "https://huggingface.co/spaces/RaghavPrasanna9207/driftenv-env"
 HF_SPACE_APP_URL = "https://raghavprasanna9207-driftenv-env.hf.space"
 
-# Create https://huggingface.co/new-model then: "user/new-repo-name"
-HF_HUB_MODEL_ID = "RaghavPrasanna9207/YOUR_MODEL_REPO_NAME"
+# Upload target: create a *Model* repo at https://huggingface.co/new-model, then set org/name here
+HF_HUB_MODEL_ID = "RaghavPrasanna9207/driftenv-grpo"
 
 USE_LOCAL_ENV_SERVER = True  # False -> use HF Space URL for /reset, /step (no uvicorn in Colab)
 ENV_PORT = 8000
@@ -172,8 +172,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-if "YOUR_MODEL_REPO_NAME" in HF_HUB_MODEL_ID:
-    raise ValueError("Set HF_HUB_MODEL_ID to your real user/model (create a Model repo on HF first).")
+_m = (HF_HUB_MODEL_ID or "").strip()
+if not _m or "YOUR_MODEL_REPO_NAME" in _m:
+    raise ValueError(
+        "Set HF_HUB_MODEL_ID in the *first* cell to your Hugging Face model id (e.g. User/model-name). "
+        "Create a repo: https://huggingface.co/new-model"
+    )
 if not (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")):
     raise RuntimeError("Set HF_TOKEN (Colab Secret or os.environ) before training.")
 

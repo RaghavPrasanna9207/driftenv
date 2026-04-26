@@ -9,10 +9,14 @@ pytest>=7.4.0
 # Machine Learning & LLM (Colab GPU)
 numpy>=1.24.0
 matplotlib>=3.7.0
-torch>=2.1.0
-transformers>=4.40.0
+# Recent trl+mergekit C++ ext ask for 2.11+ (avoids "Skipping import of cpp extensions" on Colab)
+torch>=2.11.0
 huggingface_hub>=0.22.0
+# trl GRPO pulls llm_blender, which still imports TRANSFORMERS_CACHE (removed in newer transformers)
+transformers>=4.40.0,<4.46.0
 trl>=0.8.0
+# trl TRL/GRPO imports mergekit (mergekit_utils) — not always pulled as a transitive dep
+mergekit>=0.0.6
 
 # Unsloth (git required; available on Colab, not in slim Docker)
 unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
